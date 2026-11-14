@@ -59,7 +59,7 @@ const LUNAR_SATELLITES_J2000: (KeplerianBody & {
     raanDeg: 15,
     argPeriDeg: 40,
     meanAnomalyJ2000Deg: 24,
-    periodSec: 6780, // ~113 min polar mapping orbit
+    periodSec: 6780,
     color: 0x38bdf8,
     hex: "#38bdf8",
   },
@@ -71,7 +71,7 @@ const LUNAR_SATELLITES_J2000: (KeplerianBody & {
     raanDeg: 110,
     argPeriDeg: 270,
     meanAnomalyJ2000Deg: 120,
-    periodSec: 18000, // ~5h elliptical relay orbit
+    periodSec: 18000,
     color: 0xfacc15,
     hex: "#facc15",
   },
@@ -83,7 +83,7 @@ const LUNAR_SATELLITES_J2000: (KeplerianBody & {
     raanDeg: 210,
     argPeriDeg: 0,
     meanAnomalyJ2000Deg: 245,
-    periodSec: 10800, // ~3h low-inclination relay
+    periodSec: 10800,
     color: 0x34d399,
     hex: "#34d399",
   },
@@ -267,7 +267,6 @@ export default function MoonGlobe({
   const marsRoverGroupRef = useRef<THREE.Group | null>(null);
 
   const timeScaleRef = useRef<number>(timeScale);
-  const baseEpochRef = useRef<number>(activeTimestampMs);
   const simEpochRef = useRef<number>(activeTimestampMs);
   const onEpochUpdateRef = useRef(onEpochUpdate);
 
@@ -280,7 +279,6 @@ export default function MoonGlobe({
   }, [onEpochUpdate]);
 
   useEffect(() => {
-    baseEpochRef.current = activeTimestampMs;
     simEpochRef.current = activeTimestampMs;
     onEpochUpdateRef.current?.(activeTimestampMs);
   }, [activeTimestampMs, clockResetNonce]);
@@ -363,7 +361,6 @@ export default function MoonGlobe({
         if (obj.isDirectionalLight) obj.intensity = 0.15;
       });
 
-      // 1. 3D Parallax Star Particles
       const starGeo = new THREE.BufferGeometry();
       const starCount = 1800;
       const positions = new Float32Array(starCount * 3);
@@ -383,13 +380,11 @@ export default function MoonGlobe({
         )
       );
 
-      // 2. Primary Orbital Sun Directional Light
       const sunLight = new THREE.DirectionalLight(0xfffbeb, 2.9);
       sunLight.position.set(2400, 140, 450);
       scene.add(sunLight);
       sunLightRef.current = sunLight;
 
-      // 3. Real-Time Lunar Surface Rovers (radius = 100)
       const lunarRoverGroup = new THREE.Group();
       lunarRoverGroup.visible = showRovers;
       scene.add(lunarRoverGroup);
@@ -420,13 +415,11 @@ export default function MoonGlobe({
         return { rover, mesh };
       });
 
-      // 4. Master Celestial & Satellite Group
       const celestialGroup = new THREE.Group();
       celestialGroup.visible = showCelestial;
       scene.add(celestialGroup);
       celestialGroupRef.current = celestialGroup;
 
-      // --- A. INERTIAL LUNAR ORBITING SATELLITES (Keplerian J2000) ---
       const inertialSatellitesGroup = new THREE.Group();
       celestialGroup.add(inertialSatellitesGroup);
 
@@ -439,7 +432,6 @@ export default function MoonGlobe({
         return { spec: sat, mesh };
       });
 
-      // --- B. PHOTOREALISTIC EARTH + CLOUD LAYER + ATMOSPHERE ---
       const earthOrbitRadius = 540;
       const earthGroup = new THREE.Group();
 
@@ -484,7 +476,6 @@ export default function MoonGlobe({
 
       celestialGroup.add(earthGroup);
 
-      // --- C. SUN & HELIOCENTRIC SOLAR SYSTEM (J2000 Ephemeris) ---
       const sunDistance = 2400;
       const sunSystemGroup = new THREE.Group();
 
@@ -612,7 +603,6 @@ export default function MoonGlobe({
         return { spec, obj: entry.obj };
       });
 
-      // --- D. CONTINUOUS EPOCH-LOCKED KEPLERIAN SIMULATION LOOP ---
       let lastFrameTime = performance.now();
       let lastUiBroadcast = 0;
 
@@ -636,10 +626,12 @@ export default function MoonGlobe({
 
         const celestial = getLunarCelestialAngles(currentEpochMs);
 
-        // 1. Lunar Surface Rovers
-        const roverElapsedSec = (currentEpochMs - baseEpochRef.current) / 1000;
+        // 1. Lunar Surface Rovers (evaluated at exact currentEpochMs)
         activeLunarRovers.forEach(({ rover, mesh }) => {
-          const { lat, lon } = getRoverCoordinatesAtEpoch(rover, roverElapsedSec);
+          const { lat, lon } = getRoverCoordinatesAtEpoch(
+            rover,
+            currentEpochMs
+          );
           const pos = latLonToVector3(lat, lon, 100.35);
           mesh.position.copy(pos);
           mesh.quaternion.setFromUnitVectors(
@@ -648,9 +640,12 @@ export default function MoonGlobe({
           );
         });
 
-        // 2. Mars Rovers
+        // 2. Mars Rovers (evaluated at exact currentEpochMs)
         activeMarsRovers.forEach(({ rover, mesh }) => {
-          const { lat, lon } = getRoverCoordinatesAtEpoch(rover, roverElapsedSec);
+          const { lat, lon } = getRoverCoordinatesAtEpoch(
+            rover,
+            currentEpochMs
+          );
           const pos = latLonToVector3(lat, lon, marsRadius + 0.15);
           mesh.position.copy(pos);
           mesh.quaternion.setFromUnitVectors(
@@ -667,7 +662,7 @@ export default function MoonGlobe({
           mesh.lookAt(0, 0, 0);
         });
 
-        // 4. Earth Position (Libration) & Sidereal Axial Spin
+        // 4. Earth Position & Sidereal Spin
         const earthPos = latLonToVector3(
           celestial.subEarthLat,
           celestial.subEarthLon,

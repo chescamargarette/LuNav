@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import dynamic from "next/dynamic";
 import {
   Compass,
@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import {
   evaluateSitesForSchedule,
+  evaluateCustomCoordinate,
   WhenPreset,
   getLunarCelestialAngles,
 } from "@/utils/lunarEphemeris";
@@ -40,10 +41,27 @@ const MoonMap2D = dynamic(() => import("@/components/MoonMap2D"), {
   ssr: false,
 });
 
+// Lightweight isolated clock readout so 250ms simulation ticks never re-render the main page
+function LiveUtcText({
+  initialMs,
+  subscribe,
+}: {
+  initialMs: number;
+  subscribe: (cb: (ms: number) => void) => () => void;
+}) {
+  const [text, setText] = useState(() => formatUtcTimestamp(initialMs));
+
+  useEffect(() => {
+    setText(formatUtcTimestamp(initialMs));
+    return subscribe((ms) => setText(formatUtcTimestamp(ms)));
+  }, [initialMs, subscribe]);
+
+  return <>{text}</>;
+}
+
 export default function MissionControlPage() {
   const [selectedSiteId, setSelectedSiteId] = useState<string | null>(null);
   const [is2DMode, setIs2DMode] = useState(false);
-  const [showContours, setShowContours] = useState(true);
 
   const [showCelestial, setShowCelestial] = useState(true);
   const [showRovers, setShowRovers] = useState(true);
@@ -53,14 +71,27 @@ export default function MissionControlPage() {
   const [referenceNowMs, setReferenceNowMs] = useState<number>(INITIAL_EPOCH_MS);
   const [whenPreset, setWhenPreset] = useState<WhenPreset>("suggested");
   const [customDate, setCustomDate] = useState<string>("2026-11-14");
-  const [liveEpochMs, setLiveEpochMs] = useState<number>(INITIAL_EPOCH_MS);
+  const [isRoverThinking, setIsRoverThinking] = useState(false);
+
+  const epochListenersRef = useRef<Set<(ms: number) => void>>(new Set());
+
+  const subscribeEpoch = useCallback((cb: (ms: number) => void) => {
+    epochListenersRef.current.add(cb);
+    return () => {
+      epochListenersRef.current.delete(cb);
+    };
+  }, []);
+
+  const handleEpochUpdate = useCallback((ms: number) => {
+    epochListenersRef.current.forEach((cb) => cb(ms));
+  }, []);
 
   useEffect(() => {
     const now = Date.now();
     setReferenceNowMs(now);
-    setLiveEpochMs(now);
+    handleEpochUpdate(now);
     setCustomDate(new Date(now).toISOString().split("T")[0]);
-  }, []);
+  }, [handleEpochUpdate]);
 
   const [showWherePicker, setShowWherePicker] = useState(false);
   const [targetCoords, setTargetCoords] = useState<{
@@ -74,7 +105,7 @@ export default function MissionControlPage() {
 
   const [roverInput, setRoverInput] = useState("");
   const [roverReply, setRoverReply] = useState(
-    "Ready. Tell me your rover's power or comms constraints to rank landing zones."
+    "Ready. Enter power, comms, or terrain slope constraints (e.g., 'flat slope and max power') to rank and focus the optimal landing zone."
   );
 
   const { sites, activeTimestampMs, windowSummary } = useMemo(() => {
@@ -85,7 +116,15 @@ export default function MissionControlPage() {
     );
 
     if (appliedCoords) {
-      const sorted = [...result.sites].sort((a, b) => {
+      const customSite = evaluateCustomCoordinate(
+        appliedCoords.lat,
+        appliedCoords.lon,
+        whenPreset,
+        customDate,
+        referenceNowMs
+      );
+
+      const sortedNearby = [...result.sites].sort((a, b) => {
         const distA = Math.hypot(
           a.lat - appliedCoords.lat,
           a.lon - appliedCoords.lon
@@ -96,7 +135,8 @@ export default function MissionControlPage() {
         );
         return distA - distB;
       });
-      return { ...result, sites: sorted };
+
+      return { ...result, sites: [customSite, ...sortedNearby] };
     }
 
     return result;
@@ -106,6 +146,10 @@ export default function MissionControlPage() {
     () => sites.find((s) => s.id === selectedSiteId) ?? null,
     [sites, selectedSiteId]
   );
+
+  const handleSelectSite = useCallback((site: { id: string }) => {
+    setSelectedSiteId(site.id);
+  }, []);
 
   const jumpToLunarPhase = (targetPhase: 0.5 | 0.0) => {
     const nowMs = Date.now();
@@ -120,8 +164,14 @@ export default function MissionControlPage() {
 
   const handleSearch = () => {
     setShowWherePicker(false);
-    setSelectedSiteId(null);
     setAppliedCoords(targetCoords);
+    if (targetCoords) {
+      setSelectedSiteId(
+        `custom-target-${targetCoords.lat.toFixed(2)}-${targetCoords.lon.toFixed(2)}`
+      );
+    } else {
+      setSelectedSiteId(null);
+    }
   };
 
   const handleNextResult = () => {
@@ -131,16 +181,42 @@ export default function MissionControlPage() {
     setSelectedSiteId(nextSite.id);
   };
 
-  const handleRoverAsk = (e: React.FormEvent) => {
+  const handleRoverAsk = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!roverInput.trim()) return;
-    const bestSolar = [...sites].sort(
-      (a, b) => b.sunlight_percent - a.sunlight_percent
-    )[0];
-    setRoverReply(
-      `For ${windowSummary} ("${roverInput}"), ${bestSolar.name} offers ${bestSolar.sunlight_percent}% solar power availability and ${bestSolar.comms_window_hours}h/day Earth comms.`
-    );
+    const query = roverInput.trim();
+    if (!query || isRoverThinking) return;
+
     setRoverInput("");
+    setIsRoverThinking(true);
+    setRoverReply("Analyzing ephemeris, power, and slope telemetry via Gemini...");
+
+    try {
+      const res = await fetch("/api/rover-advisor", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query,
+          sites,
+          windowSummary,
+          liveEpochUtc: formatUtcTimestamp(activeTimestampMs),
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Advisor request failed");
+
+      const matched = sites.find((s) => s.id === data.selectedSiteId);
+      if (matched) {
+        setSelectedSiteId(matched.id);
+      }
+      setRoverReply(data.reasoning);
+    } catch (err: any) {
+      setRoverReply(
+        `Advisor error: ${err.message || "Check GEMINI_API_KEY in .env.local and restart the dev server."}`
+      );
+    } finally {
+      setIsRoverThinking(false);
+    }
   };
 
   return (
@@ -151,13 +227,12 @@ export default function MissionControlPage() {
             mode="full"
             sites={sites}
             selectedSite={selectedSite}
-            showContours={showContours}
             showRovers={showRovers}
             timeScale={timeScale}
             activeTimestampMs={activeTimestampMs}
             clockResetNonce={clockResetNonce}
-            onSelectSite={(site) => setSelectedSiteId(site.id)}
-            onEpochUpdate={setLiveEpochMs}
+            onSelectSite={handleSelectSite}
+            onEpochUpdate={handleEpochUpdate}
           />
         ) : (
           <MoonGlobe
@@ -168,8 +243,8 @@ export default function MissionControlPage() {
             timeScale={timeScale}
             activeTimestampMs={activeTimestampMs}
             clockResetNonce={clockResetNonce}
-            onSelectSite={(site) => setSelectedSiteId(site.id)}
-            onEpochUpdate={setLiveEpochMs}
+            onSelectSite={handleSelectSite}
+            onEpochUpdate={handleEpochUpdate}
           />
         )}
       </div>
@@ -222,6 +297,7 @@ export default function MissionControlPage() {
           <span className="text-slate-700">|</span>
 
           <button
+            type="button"
             onClick={() => setShowWherePicker(!showWherePicker)}
             className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs hover:border-sky-500"
           >
@@ -234,6 +310,7 @@ export default function MissionControlPage() {
           </button>
 
           <button
+            type="button"
             onClick={handleSearch}
             className="rounded-xl bg-sky-500 px-4 py-1.5 text-xs font-bold text-slate-950 transition hover:bg-sky-400"
           >
@@ -241,10 +318,12 @@ export default function MissionControlPage() {
           </button>
         </div>
 
-        {/* Live Mission Epoch + Active Window Status Pill */}
         <div className="mt-1.5 flex items-center gap-2 rounded-full border border-slate-800/90 bg-slate-950/92 px-3.5 py-0.5 text-[11px] shadow-lg">
           <span className="font-mono text-emerald-300">
-            {formatUtcTimestamp(liveEpochMs)}
+            <LiveUtcText
+              initialMs={activeTimestampMs}
+              subscribe={subscribeEpoch}
+            />
           </span>
           <span className="text-slate-600">•</span>
           <span className="text-sky-300">
@@ -260,6 +339,7 @@ export default function MissionControlPage() {
               </span>
               {targetCoords && (
                 <button
+                  type="button"
                   onClick={() => {
                     setTargetCoords(null);
                     setAppliedCoords(null);
@@ -328,37 +408,20 @@ export default function MissionControlPage() {
 
           <div className="space-y-2">
             <p className="text-[11px] font-semibold tracking-wider text-slate-400 uppercase">
-              Viewport & Map Layers
+              Viewport &amp; Map Layers
             </p>
             <button
+              type="button"
               onClick={() => setIs2DMode(!is2DMode)}
               className="w-full rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-left text-xs font-medium transition hover:border-sky-500"
             >
               {is2DMode
                 ? "🌐 Switch to 3D Globe POV"
-                : "🗺️ Switch to 2D Moon Trek POV"}
+                : "🗺️ Switch to 2D Map POV"}
             </button>
 
             <button
-              onClick={() => {
-                if (!is2DMode) {
-                  setIs2DMode(true);
-                  setShowContours(true);
-                } else {
-                  setShowContours(!showContours);
-                }
-              }}
-              className={`w-full rounded-xl border px-3 py-2 text-left text-xs font-medium transition ${
-                is2DMode && showContours
-                  ? "border-amber-500/80 bg-amber-500/15 text-amber-200"
-                  : "border-slate-700 bg-slate-900 text-slate-300 hover:border-sky-500"
-              }`}
-            >
-              ⛰️ 2D Google-Style Terrain:{" "}
-              {is2DMode && showContours ? "ON" : "OFF"}
-            </button>
-
-            <button
+              type="button"
               onClick={() => setShowRovers(!showRovers)}
               className={`w-full rounded-xl border px-3 py-2 text-left text-xs font-medium transition ${
                 showRovers
@@ -377,6 +440,7 @@ export default function MissionControlPage() {
               </span>
               {!is2DMode && (
                 <button
+                  type="button"
                   onClick={() => setShowCelestial(!showCelestial)}
                   className="text-[11px] text-slate-300 hover:text-sky-400"
                 >
@@ -386,7 +450,10 @@ export default function MissionControlPage() {
             </div>
 
             <div className="rounded-lg border border-slate-800 bg-slate-950/90 px-2.5 py-1.5 font-mono text-[11px] text-emerald-300">
-              {formatUtcTimestamp(liveEpochMs)}
+              <LiveUtcText
+                initialMs={activeTimestampMs}
+                subscribe={subscribeEpoch}
+              />
             </div>
 
             <div className="grid grid-cols-6 gap-1 pt-0.5">
@@ -400,6 +467,7 @@ export default function MissionControlPage() {
               ].map((opt) => (
                 <button
                   key={opt.label}
+                  type="button"
                   onClick={() => setTimeScale(opt.val)}
                   className={`rounded-md py-1 text-[10px] font-bold transition ${
                     timeScale === opt.val
@@ -448,14 +516,16 @@ export default function MissionControlPage() {
               type="text"
               value={roverInput}
               onChange={(e) => setRoverInput(e.target.value)}
-              placeholder="e.g. Need max solar power..."
-              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-white focus:border-sky-500 focus:outline-none"
+              disabled={isRoverThinking}
+              placeholder="e.g. Flat slope and max power..."
+              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-white focus:border-sky-500 focus:outline-none disabled:opacity-50"
             />
             <button
               type="submit"
-              className="rounded-lg bg-sky-500 px-2.5 py-1.5 text-xs font-bold text-slate-950"
+              disabled={isRoverThinking}
+              className="rounded-lg bg-sky-500 px-2.5 py-1.5 text-xs font-bold text-slate-950 disabled:opacity-50"
             >
-              Ask
+              {isRoverThinking ? "..." : "Ask"}
             </button>
           </form>
         </div>
@@ -466,6 +536,7 @@ export default function MissionControlPage() {
           <div className="flex h-full flex-col justify-between">
             <div>
               <button
+                type="button"
                 onClick={() => setSelectedSiteId(null)}
                 className="flex items-center gap-1 text-xs text-sky-400 hover:underline"
               >
@@ -529,6 +600,7 @@ export default function MissionControlPage() {
             </div>
 
             <button
+              type="button"
               onClick={handleNextResult}
               className="mt-4 flex w-full items-center justify-center gap-1.5 rounded-xl bg-sky-500 py-2.5 text-xs font-bold text-slate-950 transition hover:bg-sky-400"
             >
