@@ -1,18 +1,79 @@
 
 export async function GET(request: Request) {
-    const target = new URL(request.url).searchParams.get("target");
+
+    const searchParams = new URL(request.url).searchParams;
+
+    const target = searchParams.get("target");
+
+    const startDate = searchParams.get("start") ?? "2026-12-01";
+    const stopDate = searchParams.get("stop") ?? "2026-12-02";
+
+    const isValidDate = (date: string) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return false;
+    }
+
+    const parsed = new Date(date);
+
+    return (
+        !Number.isNaN(parsed.getTime()) &&
+        parsed.toISOString().slice(0, 10) === date
+    );
+    };
+
+    if (
+    !isValidDate(startDate) ||
+    !isValidDate(stopDate) ||
+    startDate >= stopDate
+    ) {
+    return Response.json(
+        {
+        error: "Invalid date range. Use YYYY-MM-DD and ensure the end date is after the start date."
+        },
+        { status: 400 }
+    );
+    }
+
+    const stepHours = Number(searchParams.get("step") ?? "6");
+
+    if (
+    !Number.isInteger(stepHours) ||
+    stepHours < 1 ||
+    stepHours > 24
+    ) {
+    return Response.json(
+        { error: "Sampling interval must be between 1 and 24 hours" },
+        { status: 400 }
+    );
+    }
+
+    const latitude = Number(searchParams.get("lat") ?? "-89.5");
+    const longitude = Number(searchParams.get("lon") ?? "0");
+
+    if (
+        !Number.isFinite(latitude) ||
+        !Number.isFinite(longitude) ||
+        Math.abs(latitude) > 90 ||
+        Math.abs(longitude) > 180
+        ) {
+        return Response.json(
+            { error: "Invalid lunar coordinates" },
+            { status: 400 }
+        );
+    }
+
   const params = new URLSearchParams({
     format: "json",
     COMMAND: target === "earth" ? "'399'" : "'10'",
     CENTER: "'coord@301'",
     COORD_TYPE: "'GEODETIC'",
-    SITE_COORD: "'0,-89.5,0'",
+    SITE_COORD: `'${longitude},${latitude},0'`,
     EPHEM_TYPE: "'OBSERVER'",
     MAKE_EPHEM: "'YES'",
     OBJ_DATA: "'NO'",
-    START_TIME: "'2026-12-01'",
-    STOP_TIME: "'2026-12-02'",
-    STEP_SIZE: "'6 h'",
+    START_TIME: `'${startDate}'`,
+    STOP_TIME: `'${stopDate}'`,
+    STEP_SIZE: `'${stepHours} h'`,
     QUANTITIES: "'4'",
     CSV_FORMAT: "'YES'"
   });
@@ -53,7 +114,10 @@ export async function GET(request: Request) {
     return Response.json({
         source: "NASA JPL Horizons",
         target: target === "earth" ? "Earth" : "Sun",
-        observer: "Lunar south pole",
+        observer: {
+        latitude,
+        longitude
+        },
         table,
         observations
     });
