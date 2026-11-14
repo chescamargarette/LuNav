@@ -75,7 +75,9 @@ export async function GET(request: Request) {
     STOP_TIME: `'${stopDate}'`,
     STEP_SIZE: `'${stepHours} h'`,
     QUANTITIES: "'4'",
-    CSV_FORMAT: "'YES'"
+    CSV_FORMAT: "'YES'",
+    TIME_TYPE: "'UT'",
+    TIME_ZONE: "'+00:00'",
   });
 
   try {
