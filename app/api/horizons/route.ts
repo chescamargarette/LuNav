@@ -103,15 +103,39 @@ export async function GET(request: Request) {
       .split("$$EOE")[0]
       .trim();
 
-    const observations = table.split("\n").map((line: string) => {
-    const fields = line.split(",").map((value) => value.trim());
+    
+    const observations = table
+    .split("\n")
+    .filter((line: string) => line.trim() !== "")
+    .map((line: string) => {
+        const fields = line.split(",").map((value) => value.trim());
 
-    return {
+        if (
+        fields.length < 5 ||
+        !fields[0] ||
+        !fields[3] ||
+        !fields[4]
+        ) {
+        throw new Error(`Incomplete NASA observation: ${line}`);
+        }
+
+        const azimuthDeg = Number(fields[3]);
+        const elevationDeg = Number(fields[4]);
+
+        if (
+        !Number.isFinite(azimuthDeg) ||
+        !Number.isFinite(elevationDeg)
+        ) {
+        throw new Error(`Invalid NASA angles: ${line}`);
+        }
+
+        return {
         time: fields[0],
-        azimuthDeg: Number(fields[3]),
-        elevationDeg: Number(fields[4])
-    };
+        azimuthDeg,
+        elevationDeg
+        };
     });
+
 
     return Response.json({
         source: "NASA JPL Horizons",

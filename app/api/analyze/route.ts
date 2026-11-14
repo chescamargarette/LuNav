@@ -70,6 +70,33 @@ export async function GET(request: Request) {
       }
     );
 
+    // Estimating visibility availability across sampling intervals
+    const intervals = conditions.slice(0, -1);
+
+    const totalIntervals = intervals.length;
+
+    const sunlightIntervals = intervals.filter(
+    (sample) => sample.sunVisible
+    ).length;
+
+    const earthVisibleIntervals = intervals.filter(
+    (sample) => sample.earthVisible
+    ).length;
+
+    const availability = {
+    sunlightPercent:
+        totalIntervals > 0
+        ? (sunlightIntervals / totalIntervals) * 100
+        : null,
+
+    earthVisibilityPercent:
+        totalIntervals > 0
+        ? (earthVisibleIntervals / totalIntervals) * 100
+        : null,
+
+    evaluatedIntervals: totalIntervals
+    };
+
     // Returning astronomical data and baseline visibility
     return Response.json({
       application: "LuNav",
@@ -79,7 +106,8 @@ export async function GET(request: Request) {
       thresholdDeg: 0,
       sun: sunData.observations,
       earth: earthData.observations,
-      conditions
+      conditions,
+      availability
     });
 
 

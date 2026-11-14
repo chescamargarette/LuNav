@@ -18,6 +18,11 @@ type AnalysisResponse = {
     earthVisible: boolean;
     condition: string;
   }[];
+  availability: {
+  sunlightPercent: number | null;
+  earthVisibilityPercent: number | null;
+  evaluatedIntervals: number;
+  };
 };
 
 export default function HorizonsPlayground() {
@@ -138,13 +143,13 @@ export default function HorizonsPlayground() {
     </h3>
 
     <p className="text-2xl font-bold">
-      {result.conditions.filter(c => c.sunVisible).length}
-      {" / "}
-      {result.conditions.length}
+    {result.availability.sunlightPercent === null
+    ? "N/A"
+    : `${result.availability.sunlightPercent.toFixed(1)}%`}
     </p>
 
     <p className="text-sm text-slate-400">
-      Samples with Sun above horizon
+    Estimated sunlight availability
     </p>
   </div>
 
@@ -154,13 +159,13 @@ export default function HorizonsPlayground() {
     </h3>
 
     <p className="text-2xl font-bold">
-      {result.conditions.filter(c => c.earthVisible).length}
-      {" / "}
-      {result.conditions.length}
+      {result.availability.earthVisibilityPercent === null
+        ? "N/A"
+        : `${result.availability.earthVisibilityPercent.toFixed(1)}%`}
     </p>
 
     <p className="text-sm text-slate-400">
-      Samples with Earth above horizon
+    Estimated direct Earth LOS availability
     </p>
   </div>
 
