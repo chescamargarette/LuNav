@@ -106,6 +106,90 @@ export default function MissionControlPage() {
     () => sites.find((s) => s.id === selectedSiteId) ?? null,
     [sites, selectedSiteId]
   );
+  
+
+useEffect(() => {
+  // Using a selected site or the user's applied coordinates
+  const coords = selectedSite
+    ? { lat: selectedSite.lat, lon: selectedSite.lon }
+    : appliedCoords;
+
+  if (!coords) return;
+
+  // Determining the selected mission start date in UTC
+  const start =
+    whenPreset === "custom"
+      ? customDate
+      : new Date(activeTimestampMs).toISOString().slice(0, 10);
+
+  // Converting schedule presets into test durations
+  const durationDays =
+    whenPreset === "3d" ? 3 :
+    whenPreset === "1w" ? 7 :
+    whenPreset === "1m" ? 30 :
+    whenPreset === "custom" ? 1 : 30;
+
+  const stop = new Date(
+    Date.parse(`${start}T00:00:00Z`) +
+    durationDays * 86400000
+  ).toISOString().slice(0, 10);
+
+  const params = new URLSearchParams({
+    lat: String(coords.lat),
+    lon: String(coords.lon),
+    start,
+    stop,
+    step: "6",
+  });
+
+  const controller = new AbortController();
+
+  async function testAnalysis() {
+    try {
+      console.log("LuNav Mission Input:", {
+        coordinates: coords,
+        start,
+        stop,
+        samplingHours: 6,
+      });
+
+      const response = await fetch(`/api/analyze?${params}`, {
+        signal: controller.signal,
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Mission analysis failed");
+      }
+
+      console.log("LuNav NASA Analysis:", {
+        observer: data.observer,
+        availability: data.availability,
+        conditions: data.conditions,
+      });
+
+    } catch (error) {
+      if (
+        !(error instanceof Error && error.name === "AbortError")
+      ) {
+        console.error("LuNav analysis error:", error);
+      }
+    }
+  }
+
+  testAnalysis();
+
+  return () => controller.abort();
+
+}, [
+  selectedSite,
+  appliedCoords,
+  whenPreset,
+  customDate,
+  activeTimestampMs,
+]);
+
 
   const jumpToLunarPhase = (targetPhase: 0.5 | 0.0) => {
     const nowMs = Date.now();
