@@ -76,11 +76,11 @@ export async function GET(request: Request) {
     const totalIntervals = intervals.length;
 
     const sunlightIntervals = intervals.filter(
-    (sample) => sample.sunVisible
+    (sample: { sunVisible: boolean }) => sample.sunVisible
     ).length;
 
     const earthVisibleIntervals = intervals.filter(
-    (sample) => sample.earthVisible
+    (sample: { earthVisible: boolean }) => sample.earthVisible
     ).length;
 
     const availability = {
