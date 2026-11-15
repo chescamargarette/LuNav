@@ -16,14 +16,23 @@ export const CANDIDATE_SITES_BASE: CandidateSiteBase[] = [
   {
     id: "shackleton-rim-01",
     name: "Shackleton Crater Rim",
-    region: "Lunar South Pole",
+    region: "Lunar South Pole (Artemis Zone)",
     lat: -89.54,
     lon: 0.0,
     slope_deg: 3.1,
     rimElevationBoostDeg: 6.2,
   },
   {
-    id: "malapert-massif-02",
+    id: "connecting-ridge-02",
+    name: "Shackleton–de Gerlache Ridge",
+    region: "South Pole Connecting Ridge",
+    lat: -89.45,
+    lon: -137.8,
+    slope_deg: 3.8,
+    rimElevationBoostDeg: 6.5,
+  },
+  {
+    id: "malapert-massif-03",
     name: "Malapert Massif Peak",
     region: "South Polar Highlands",
     lat: -86.0,
@@ -32,7 +41,16 @@ export const CANDIDATE_SITES_BASE: CandidateSiteBase[] = [
     rimElevationBoostDeg: 5.4,
   },
   {
-    id: "aristarchus-03",
+    id: "nobile-rim-04",
+    name: "Nobile Crater Western Rim",
+    region: "South Polar Region (Artemis Zone)",
+    lat: -85.2,
+    lon: 53.5,
+    slope_deg: 4.1,
+    rimElevationBoostDeg: 5.1,
+  },
+  {
+    id: "aristarchus-05",
     name: "Aristarchus Plateau",
     region: "Oceanus Procellarum",
     lat: 23.7,
@@ -41,9 +59,9 @@ export const CANDIDATE_SITES_BASE: CandidateSiteBase[] = [
     rimElevationBoostDeg: 0.8,
   },
   {
-    id: "mare-tranquillitatis-04",
+    id: "mare-tranquillitatis-06",
     name: "Statio Tranquillitatis",
-    region: "Sea of Tranquility",
+    region: "Sea of Tranquility (Apollo 11)",
     lat: 0.67,
     lon: 23.47,
     slope_deg: 1.4,
@@ -73,7 +91,6 @@ function formatDateISO(ms: number): string {
   return new Date(ms).toISOString().split("T")[0];
 }
 
-// Newton-Raphson solver for Kepler's Equation: M = E - e * sin(E)
 export function solveKepler(meanAnomalyRad: number, ecc: number): number {
   let E = meanAnomalyRad;
   for (let i = 0; i < 6; i++) {
@@ -95,7 +112,6 @@ export interface KeplerianBody {
   periodSec: number;
 }
 
-// Real J2000.0 Heliocentric Orbital Elements (visualized around the Sun at 2400 units)
 export const PLANETARY_EPHEMERIS_J2000: KeplerianBody[] = [
   {
     name: "MERCURY",
@@ -149,7 +165,6 @@ export const PLANETARY_EPHEMERIS_J2000: KeplerianBody[] = [
   },
 ];
 
-// Compute 3D Keplerian Cartesian position at an exact UTC timestamp
 export function computeKeplerianPosition(
   body: KeplerianBody,
   timestampMs: number
@@ -163,7 +178,6 @@ export function computeKeplerianPosition(
   const xOrb = body.semiMajor * (Math.cos(E) - body.ecc);
   const zOrb = semiMinor * Math.sin(E);
 
-  // Rotate by Argument of Periapsis (w), Inclination (i), and RAAN (Omega)
   const w = body.argPeriDeg * DEG2RAD;
   const inc = body.incDeg * DEG2RAD;
   const om = body.raanDeg * DEG2RAD;
@@ -188,7 +202,6 @@ export function computeKeplerianPosition(
   };
 }
 
-// Compute Subsolar, Sub-Earth, Sidereal Rotation & Earth Heliocentric Longitude at UTC timestamp
 export function getLunarCelestialAngles(timestampMs: number) {
   const daysSinceNewMoon = (timestampMs - NEW_MOON_EPOCH_MS) / 86400000;
   const daysSinceJ2000 = (timestampMs - J2000_EPOCH_MS) / 86400000;
@@ -206,11 +219,9 @@ export function getLunarCelestialAngles(timestampMs: number) {
   const subEarthLon = 7.6 * Math.sin(anomAngle);
   const subEarthLat = 6.7 * Math.sin(dracAngle);
 
-  // Moon's inertial sidereal rotation angle since J2000 (used to keep inertial orbits fixed in space)
   const lunarSiderealRad =
     ((daysSinceJ2000 / SIDEREAL_MONTH_DAYS) * Math.PI * 2) % (Math.PI * 2);
 
-  // Earth's heliocentric ecliptic longitude at timestampMs
   const earthMeanLonDeg = 100.464 + 0.9856076686 * daysSinceJ2000;
   const earthHelioLonRad = earthMeanLonDeg * DEG2RAD;
 
@@ -345,6 +356,83 @@ function findOptimal7DayWindow(site: CandidateSiteBase, baseMs: number) {
     startMs: bestStartMs,
     endMs: bestStartMs + 7 * 86400000,
     metrics: bestMetrics,
+  };
+}
+
+// Evaluate any user-picked [lat, lon] coordinate with topocentric ephemeris
+export function evaluateCustomCoordinate(
+  lat: number,
+  lon: number,
+  whenPreset: WhenPreset,
+  customDate: string,
+  referenceNowMs = Date.UTC(2026, 10, 14, 12, 0, 0)
+): LandingSite {
+  const absLat = Math.abs(lat);
+  const isPolar = absLat >= 75;
+  const estimatedSlope = Number(
+    (1.5 + (absLat / 90) * 3.4 + (Math.abs(Math.sin(lon * DEG2RAD)) * 1.4)).toFixed(1)
+  );
+  const rimBoost = isPolar ? 3.2 : 0.5;
+
+  const customBase: CandidateSiteBase = {
+    id: `custom-target-${lat.toFixed(2)}-${lon.toFixed(2)}`,
+    name: `Target Zone (${lat.toFixed(2)}°, ${lon.toFixed(2)}°)`,
+    region:
+      lat <= -65
+        ? "Lunar South Polar Region"
+        : lat >= 65
+        ? "Lunar North Polar Region"
+        : Math.abs(lon) <= 90
+        ? "Lunar Near Side"
+        : "Lunar Far Side",
+    lat,
+    lon,
+    slope_deg: estimatedSlope,
+    rimElevationBoostDeg: rimBoost,
+  };
+
+  let startMs = referenceNowMs;
+  let durationDays = 7;
+
+  if (whenPreset === "3d") durationDays = 3;
+  else if (whenPreset === "1w") durationDays = 7;
+  else if (whenPreset === "1m") durationDays = 30;
+  else if (whenPreset === "custom" && customDate) {
+    const parsed = Date.parse(`${customDate}T12:00:00Z`);
+    if (!Number.isNaN(parsed)) {
+      startMs = parsed;
+      durationDays = 3;
+    }
+  }
+
+  if (whenPreset === "suggested") {
+    const optimal = findOptimal7DayWindow(customBase, referenceNowMs);
+    return {
+      id: customBase.id,
+      name: customBase.name,
+      region: customBase.region,
+      lat: customBase.lat,
+      lon: customBase.lon,
+      slope_deg: customBase.slope_deg,
+      recommended_window: `${formatDateISO(optimal.startMs)} to ${formatDateISO(
+        optimal.endMs
+      )}`,
+      ...optimal.metrics,
+    };
+  }
+
+  const metrics = integrateWindowMetrics(customBase, startMs, durationDays);
+  const endMs = startMs + durationDays * 86400000;
+
+  return {
+    id: customBase.id,
+    name: customBase.name,
+    region: customBase.region,
+    lat: customBase.lat,
+    lon: customBase.lon,
+    slope_deg: customBase.slope_deg,
+    recommended_window: `${formatDateISO(startMs)} to ${formatDateISO(endMs)}`,
+    ...metrics,
   };
 }
 
