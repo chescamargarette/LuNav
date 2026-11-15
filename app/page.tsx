@@ -2,7 +2,6 @@
 
 import { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import dynamic from "next/dynamic";
-import { GoogleGenAI } from "@google/genai";
 import {
   Menu,
   Bot,
@@ -30,6 +29,9 @@ import {
   Rocket,
   Sparkles,
   Eclipse,
+  SlidersHorizontal,
+  Clock,
+  AlertTriangle,
 } from "lucide-react";
 import {
   evaluateSitesForSchedule,
@@ -39,14 +41,397 @@ import {
 } from "@/utils/lunarEphemeris";
 import { TerrainLayerMode } from "@/utils/lunarTextures";
 import { LandingSite } from "@/data/mockSites";
-import type { SpaceMarkerShape } from "@/components/MoonMap2D";
+import type { SpaceMarkerShape, TrafficMapItem } from "@/components/MoonMap2D";
+
+const INITIAL_EPOCH_MS = Date.UTC(2026, 10, 14, 12, 0, 0);
+
+const EPOCH_OPTIONS: { value: WhenPreset; label: string }[] = [
+  { value: "suggested", label: "AUTO-OPTIMAL" },
+  { value: "3d", label: "T+ 3 DAYS" },
+  { value: "1w", label: "T+ 1 WEEK" },
+  { value: "1m", label: "T+ 1 MONTH" },
+  { value: "custom", label: "MANUAL ENTRY" },
+];
+
+const MARKER_SHAPES: { id: SpaceMarkerShape; label: string }[] = [
+  { id: "reticle", label: "RETICLE" },
+  { id: "lander", label: "LANDER" },
+  { id: "diamond", label: "DIAMOND" },
+];
+
+interface TimezoneOption {
+  id: string;
+  label: string;
+  short: string;
+  timeZone: string;
+}
+
+const TIMEZONE_OPTIONS: TimezoneOption[] = [
+  { id: "UTC", label: "UTC (GMT+0)", short: "UTC", timeZone: "UTC" },
+  {
+    id: "PHT",
+    label: "PHT • MANILA (UTC+8)",
+    short: "PHT",
+    timeZone: "Asia/Manila",
+  },
+  {
+    id: "JST",
+    label: "JST • TOKYO (UTC+9)",
+    short: "JST",
+    timeZone: "Asia/Tokyo",
+  },
+  {
+    id: "EST",
+    label: "EST • NEW YORK (UTC-5)",
+    short: "EST",
+    timeZone: "America/New_York",
+  },
+  {
+    id: "PST",
+    label: "PST • LOS ANGELES (UTC-8)",
+    short: "PST",
+    timeZone: "America/Los_Angeles",
+  },
+  {
+    id: "CET",
+    label: "CET • PARIS (UTC+1)",
+    short: "CET",
+    timeZone: "Europe/Paris",
+  },
+];
+
+export type MissionTrafficStatus = "PLANNED" | "ACTIVE" | "PAST";
+
+export interface SiteMissionTrafficItem extends TrafficMapItem {
+  agency: string;
+  windowOrDate: string;
+  note: string;
+  briefDescription: string;
+  objective: string;
+}
+
+/**
+ * PLACEHOLDER LUNAR TRAFFIC & MISSION HISTORY DATA
+ * Replace this generator once the site-conflict / traffic algorithm is finalized.
+ */
+function getSiteMissionTraffic(site: LandingSite): SiteMissionTrafficItem[] {
+  const idLower = site.id.toLowerCase();
+  const nameLower = site.name.toLowerCase();
+
+  if (idLower.includes("shackleton") || nameLower.includes("shackleton")) {
+    return [
+      {
+        id: "tr-shack-1",
+        spacecraft: "ARTEMIS III HLS",
+        agency: "NASA / SPACEX",
+        status: "PLANNED",
+        windowOrDate: "NET Q4 2027",
+        separationKm: 8.4,
+        bearingDeg: 42,
+        note: "Connecting Ridge Touchdown Zone",
+        objective: "Crewed Lunar South Pole Surface Sortie",
+        briefDescription:
+          "Human Landing System targeting the sunlit connecting ridge adjacent to Shackleton Crater to conduct EVA traverses and sample permanently shadowed regolith.",
+      },
+      {
+        id: "tr-shack-2",
+        spacecraft: "CHANG'E-7 HOPPER",
+        agency: "CNSA",
+        status: "PLANNED",
+        windowOrDate: "Q4 2026",
+        separationKm: 19.2,
+        bearingDeg: 145,
+        note: "Illuminated Rim Shadow Survey",
+        objective: "Water-Ice & Volatile Plume Detection",
+        briefDescription:
+          "Multi-spacecraft orbiter, lander, rover, and mini-flying probe designed to hop into Shackleton's permanently shadowed crater floor for direct water-ice spectroscopy.",
+      },
+      {
+        id: "tr-shack-3",
+        spacecraft: "IM-2 ATHENA",
+        agency: "INTUITIVE MACHINES",
+        status: "PAST",
+        windowOrDate: "MAR 2025",
+        separationKm: 42.0,
+        bearingDeg: 225,
+        note: "Mons Mouton Subsurface Drill",
+        objective: "PRIME-1 Drill & Mass Spectrometer",
+        briefDescription:
+          "Commercial Nova-C lander deployed to Mons Mouton plateau near Shackleton to drill 1 meter into lunar regolith and measure subsurface volatile gases.",
+      },
+      {
+        id: "tr-shack-4",
+        spacecraft: "LCROSS IMPACTOR",
+        agency: "NASA",
+        status: "PAST",
+        windowOrDate: "OCT 2009",
+        separationKm: 64.5,
+        bearingDeg: 310,
+        note: "Cabeus Water-Ice Plume Plunge",
+        objective: "Kinetic Ejecta Plume Spectroscopy",
+        briefDescription:
+          "Centaur upper stage and shepherding spacecraft impacted Cabeus crater near the South Pole, confirming water ice and hydroxyl concentrations in the ejecta plume.",
+      },
+    ];
+  }
+
+  if (idLower.includes("malapert") || nameLower.includes("malapert")) {
+    return [
+      {
+        id: "tr-mal-1",
+        spacecraft: "LUPEX ROVER",
+        agency: "JAXA / ISRO",
+        status: "PLANNED",
+        windowOrDate: "2027 WINDOW",
+        separationKm: 11.6,
+        bearingDeg: 68,
+        note: "South Pole Polar Water Prospecting",
+        objective: "Autonomous Drill & Neutron Spectrometer",
+        briefDescription:
+          "Joint JAXA-ISRO Lunar Polar Exploration mission surveying water distribution, regolith bearing strength, and high-elevation Earth line-of-sight corridors.",
+      },
+      {
+        id: "tr-mal-2",
+        spacecraft: "BLUE GHOST M2",
+        agency: "FIREFLY / ESA",
+        status: "PLANNED",
+        windowOrDate: "2027 WINDOW",
+        separationKm: 28.0,
+        bearingDeg: 195,
+        note: "Far-Side Relay & South Massif",
+        objective: "CLPS Surface Delivery & Lunar Pathfinder",
+        briefDescription:
+          "Dual-stage lander and orbital relay mission delivering scientific payloads to the southern highlands while maintaining continuous Earth communications.",
+      },
+      {
+        id: "tr-mal-3",
+        spacecraft: "IM-1 ODYSSEUS",
+        agency: "INTUITIVE MACHINES",
+        status: "PAST",
+        windowOrDate: "FEB 2024",
+        separationKm: 34.8,
+        bearingDeg: 285,
+        note: "Malapert A Crater Landing",
+        objective: "First US Soft Landing Since Apollo 17",
+        briefDescription:
+          "Landed inside Malapert A crater roughly 300 km from the South Pole, testing precision terrain-relative navigation and cryogenic propulsion.",
+      },
+    ];
+  }
+
+  if (idLower.includes("nobile") || nameLower.includes("nobile")) {
+    return [
+      {
+        id: "tr-nob-1",
+        spacecraft: "GRIFFIN MISSION ONE",
+        agency: "ASTROBOTIC",
+        status: "PLANNED",
+        windowOrDate: "LATE 2026",
+        separationKm: 14.3,
+        bearingDeg: 55,
+        note: "Nobile Western Rim Traverse",
+        objective: "South Polar Terrain & Mobility Demo",
+        briefDescription:
+          "Heavy-class CLPS lander targeting the Nobile crater western rim to validate hazard-avoidance landing sensors and deploy surface mobility rovers.",
+      },
+      {
+        id: "tr-nob-2",
+        spacecraft: "VIPER FLIGHT MODEL",
+        agency: "NASA",
+        status: "PLANNED",
+        windowOrDate: "TBD 2027",
+        separationKm: 22.5,
+        bearingDeg: 165,
+        note: "Volatile Mapping Corridor",
+        objective: "100-Day Subsurface Ice Resource Map",
+        briefDescription:
+          "Mobile prospecting rover equipped with neutron spectrometers and a 1-meter percussive drill to map harvestable ice deposits across Nobile's rim.",
+      },
+      {
+        id: "tr-nob-3",
+        spacecraft: "SMART-1 IMPACT",
+        agency: "ESA",
+        status: "PAST",
+        windowOrDate: "SEP 2006",
+        separationKm: 88.0,
+        bearingDeg: 260,
+        note: "Lacus Excellentiae Grazing Impact",
+        objective: "Solar-Electric Propulsion & X-Ray Mapping",
+        briefDescription:
+          "ESA's first lunar orbiter mapped polar illumination cycles and elemental composition before concluding with a controlled grazing impact.",
+      },
+    ];
+  }
+
+  if (
+    idLower.includes("tranquillitatis") ||
+    nameLower.includes("tranquillitatis")
+  ) {
+    return [
+      {
+        id: "tr-tranq-1",
+        spacecraft: "LUNAR OUTPOST MAPP",
+        agency: "COMMERCIAL",
+        status: "PLANNED",
+        windowOrDate: "2027 WINDOW",
+        separationKm: 16.5,
+        bearingDeg: 52,
+        note: "Mare Basalt Regolith Sampling",
+        objective: "Commercial ISRU Regolith Collection",
+        briefDescription:
+          "Autonomous four-wheeled prospector rover scheduled to traverse basaltic mare plains, capture high-resolution stereo maps, and collect regolith samples.",
+      },
+      {
+        id: "tr-tranq-2",
+        spacecraft: "APOLLO 11 EAGLE",
+        agency: "NASA",
+        status: "PAST",
+        windowOrDate: "JUL 1969",
+        separationKm: 0.4,
+        bearingDeg: 215,
+        note: "First Crewed Lunar Landing",
+        objective: "Tranquility Base Sample Return & EASEP",
+        briefDescription:
+          "Historic first human touchdown on the Moon at 0.674° N, 23.473° E; deployed passive seismometer, laser ranging retroreflector, and returned 21.5 kg of mare basalt.",
+      },
+      {
+        id: "tr-tranq-3",
+        spacecraft: "SURVEYOR 5",
+        agency: "NASA",
+        status: "PAST",
+        windowOrDate: "SEP 1967",
+        separationKm: 24.8,
+        bearingDeg: 325,
+        note: "Alpha-Scattering Soil Analysis",
+        objective: "Pre-Apollo Mare Bearing Strength Check",
+        briefDescription:
+          "Robotic lander that confirmed Mare Tranquillitatis consists of basaltic rock with sufficient bearing strength to support crewed Apollo landers.",
+      },
+    ];
+  }
+
+  if (idLower.includes("aristarchus") || nameLower.includes("aristarchus")) {
+    return [
+      {
+        id: "tr-ari-1",
+        spacecraft: "IM-4 PROSPECTOR",
+        agency: "INTUITIVE MACHINES",
+        status: "PLANNED",
+        windowOrDate: "2027 WINDOW",
+        separationKm: 18.9,
+        bearingDeg: 80,
+        note: "Vallis Schröteri Pyroclastic Survey",
+        objective: "Silica-Rich Volcanic Glass Spectrometry",
+        briefDescription:
+          "Targets the Aristarchus Plateau to analyze pyroclastic volcanic beads rich in oxygen and titanium for future propellant production.",
+      },
+      {
+        id: "tr-ari-2",
+        spacecraft: "LUNA 16 / LUNA 24",
+        agency: "USSR",
+        status: "PAST",
+        windowOrDate: "1970–1976",
+        separationKm: 95.0,
+        bearingDeg: 130,
+        note: "Robotic Core Sample Return",
+        objective: "Automated Deep Regolith Core Extraction",
+        briefDescription:
+          "Series of robotic sample-return landers that drilled up to 2 meters into lunar mare basins and returned sealed regolith cores to Earth.",
+      },
+    ];
+  }
+
+  // Fallback placeholder traffic for any custom dropped beacon or additional candidate site
+  const hashSeed = Math.abs(Math.round(site.lat * 13 + site.lon * 7));
+  const sep1 = Number((6.5 + (hashSeed % 22)).toFixed(1));
+  const sep2 = Number((26.0 + (hashSeed % 45)).toFixed(1));
+
+  return [
+    {
+      id: `tr-custom-1-${site.id}`,
+      spacecraft: `CLPS-TX0${(hashSeed % 8) + 2} LANDER`,
+      agency: "COMMERCIAL / NASA",
+      status: "PLANNED",
+      windowOrDate: "Q2 2027",
+      separationKm: sep1,
+      bearingDeg: (hashSeed * 47) % 360,
+      note: "Placeholder Inbound Trajectory",
+      objective: "Surface Payload Delivery & Hazard Nav",
+      briefDescription:
+        "Placeholder commercial lander manifest projected near this coordinate sector. Will update dynamically once the traffic conflict algorithm is integrated.",
+    },
+    {
+      id: `tr-custom-2-${site.id}`,
+      spacecraft: `SELENE-R${(hashSeed % 5) + 1} SCOUT`,
+      agency: "JAXA",
+      status: "PLANNED",
+      windowOrDate: "Q4 2027",
+      separationKm: sep2,
+      bearingDeg: (hashSeed * 113 + 120) % 360,
+      note: "Placeholder Surface Beacon",
+      objective: "Pinpoint Landing & Micro-Rover Test",
+      briefDescription:
+        "Placeholder secondary surface mission queued in the same regional corridor for multi-spacecraft separation and frequency coordination.",
+    },
+    {
+      id: `tr-custom-3-${site.id}`,
+      spacecraft: "LRO ORBITAL PASS",
+      agency: "NASA",
+      status: "ACTIVE",
+      windowOrDate: "CURRENT",
+      separationKm: 50.0,
+      bearingDeg: 0,
+      note: "50 km Polar Reconnaissance Track",
+      objective: "High-Resolution NAC & LOLA Altimetry",
+      briefDescription:
+        "Active Lunar Reconnaissance Orbiter mapping pass providing 0.5 m/pixel Narrow Angle Camera imagery and laser altimetry across this landing zone.",
+    },
+    {
+      id: `tr-custom-4-${site.id}`,
+      spacecraft: "GRAIL-A / EBB",
+      agency: "NASA",
+      status: "PAST",
+      windowOrDate: "DEC 2012",
+      separationKm: 74.2,
+      bearingDeg: 240,
+      note: "Historical Gravity Mapping Archive",
+      objective: "Crustal Thickness & Mascon Profiling",
+      briefDescription:
+        "Twin spacecraft gravity-field survey that mapped subsurface mass concentrations (mascons) used to compute descent trajectory perturbations.",
+    },
+  ];
+}
+
+function formatEpochInTimezone(ms: number, tzOption: TimezoneOption): string {
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: tzOption.timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).formatToParts(new Date(ms));
+
+    const get = (type: string) =>
+      parts.find((p) => p.type === type)?.value ?? "00";
+    const hour = get("hour") === "24" ? "00" : get("hour");
+    return `${get("year")}-${get("month")}-${get("day")} ${hour}:${get(
+      "minute"
+    )}:${get("second")} ${tzOption.short}`;
+  } catch {
+    const iso = new Date(ms).toISOString();
+    return `${iso.slice(0, 10)} ${iso.slice(11, 19)} UTC`;
+  }
+}
 
 function computeLiveSiteSolarEarth(
   site: LandingSite,
   baseEpochMs: number,
   currentEpochMs: number
 ) {
-  const { synodicPhase } = getLunarCelestialAngles(currentEpochMs);
   const deltaDays = (currentEpochMs - baseEpochMs) / 86400000;
   const deltaSunAngleRad = (deltaDays / 29.530588853) * Math.PI * 2;
 
@@ -76,27 +461,6 @@ function computeLiveSiteSolarEarth(
   };
 }
 
-const INITIAL_EPOCH_MS = Date.UTC(2026, 10, 14, 12, 0, 0);
-
-const EPOCH_OPTIONS: { value: WhenPreset; label: string }[] = [
-  { value: "suggested", label: "AUTO-OPTIMAL" },
-  { value: "3d", label: "T+ 3 DAYS" },
-  { value: "1w", label: "T+ 1 WEEK" },
-  { value: "1m", label: "T+ 1 MONTH" },
-  { value: "custom", label: "MANUAL ENTRY" },
-];
-
-const MARKER_SHAPES: { id: SpaceMarkerShape; label: string }[] = [
-  { id: "reticle", label: "RETICLE" },
-  { id: "lander", label: "LANDER" },
-  { id: "diamond", label: "DIAMOND" },
-];
-
-function formatUtcTimestamp(ms: number): string {
-  const iso = new Date(ms).toISOString();
-  return `${iso.slice(0, 10)} ${iso.slice(11, 19)} UTC`;
-}
-
 const MoonGlobe = dynamic(() => import("@/components/MoonGlobe"), {
   ssr: false,
   loading: () => (
@@ -110,18 +474,33 @@ const MoonMap2D = dynamic(() => import("@/components/MoonMap2D"), {
   ssr: false,
 });
 
-function LiveUtcText({
+function LiveClockText({
   initialMs,
+  timezoneOption,
   subscribe,
 }: {
   initialMs: number;
+  timezoneOption: TimezoneOption;
   subscribe: (cb: (ms: number) => void) => () => void;
 }) {
-  const [text, setText] = useState(() => formatUtcTimestamp(initialMs));
+  const latestMsRef = useRef<number>(initialMs);
+  const [text, setText] = useState(() =>
+    formatEpochInTimezone(initialMs, timezoneOption)
+  );
+
   useEffect(() => {
-    setText(formatUtcTimestamp(initialMs));
-    return subscribe((ms) => setText(formatUtcTimestamp(ms)));
-  }, [initialMs, subscribe]);
+    latestMsRef.current = initialMs;
+    setText(formatEpochInTimezone(initialMs, timezoneOption));
+  }, [initialMs]);
+
+  useEffect(() => {
+    setText(formatEpochInTimezone(latestMsRef.current, timezoneOption));
+    return subscribe((ms) => {
+      latestMsRef.current = ms;
+      setText(formatEpochInTimezone(ms, timezoneOption));
+    });
+  }, [timezoneOption, subscribe]);
+
   return <>{text}</>;
 }
 
@@ -190,7 +569,7 @@ function SurfaceHorizonSideView({
 
       <svg
         viewBox="0 0 256 122"
-        className="h-28 w-full overflow-hidden rounded-xl border border-white/5 bg-[#050711]"
+        className="h-24 w-full overflow-hidden rounded-xl border border-white/5 bg-[#050711]"
       >
         <defs>
           <radialGradient id="lunavSunHalo" cx="50%" cy="50%" r="50%">
@@ -372,12 +751,25 @@ export default function MissionControlPage() {
   const [markerShape, setMarkerShape] = useState<SpaceMarkerShape>("reticle");
 
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isMoreSettingsOpen, setIsMoreSettingsOpen] = useState(false);
   const [isAiOpen, setIsAiOpen] = useState(false);
   const [isEpochMenuOpen, setIsEpochMenuOpen] = useState(false);
   const [isPinDropMode, setIsPinDropMode] = useState(false);
   const [showRovers, setShowRovers] = useState(true);
   const [showSolarShadows, setShowSolarShadows] = useState(true);
   const [showCelestial, setShowCelestial] = useState(true);
+
+  // "More Settings" State: Landing Site Exclusion / Spacing Interval (km) & Timezone
+  const [siteIntervalKm, setSiteIntervalKm] = useState<number>(25);
+  const [selectedTimezoneId, setSelectedTimezoneId] = useState<string>("UTC");
+
+  // Lunar Traffic Filter & Expandable Mission Detail State
+  const [trafficFilter, setTrafficFilter] = useState<
+    "ALL" | MissionTrafficStatus
+  >("ALL");
+  const [expandedMissionId, setExpandedMissionId] = useState<string | null>(
+    null
+  );
 
   // Time & Selection State
   const [selectedSiteId, setSelectedSiteId] = useState<string | null>(null);
@@ -495,15 +887,36 @@ export default function MissionControlPage() {
     [sites, selectedSiteId]
   );
 
-  useEffect(() => {
-    if (selectedSite && is2DMode) {
-      setProjectionMode(selectedSite.lat < -65 ? "SP" : "EQ");
-    }
-  }, [selectedSite, is2DMode]);
+  const selectedSiteTraffic = useMemo(
+    () => (selectedSite ? getSiteMissionTraffic(selectedSite) : []),
+    [selectedSite]
+  );
 
-  const handleSelectSite = useCallback((site: { id: string }) => {
-    setSelectedSiteId(site.id);
-  }, []);
+  // Reset expanded mission card when switching sites
+  useEffect(() => {
+    setExpandedMissionId(null);
+  }, [selectedSiteId]);
+
+  const activeTimezoneOption = useMemo(
+    () =>
+      TIMEZONE_OPTIONS.find((tz) => tz.id === selectedTimezoneId) ??
+      TIMEZONE_OPTIONS[0],
+    [selectedTimezoneId]
+  );
+
+  const handleSelectSite = useCallback(
+    (site: { id: string; lat?: number }) => {
+      setSelectedSiteId(site.id);
+      if (
+        is2DMode &&
+        !site.id.startsWith("pinned-") &&
+        typeof site.lat === "number"
+      ) {
+        setProjectionMode(site.lat < -65 ? "SP" : "EQ");
+      }
+    },
+    [is2DMode]
+  );
 
   const toggleViewMode = () => {
     setIs2DMode((prev) => {
@@ -620,18 +1033,18 @@ export default function MissionControlPage() {
       const res = await fetch("/api/rover-advisor", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, sites, windowSummary }),
+        body: JSON.stringify({
+          query,
+          sites,
+          windowSummary,
+        }),
       });
 
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || `Advisor route failed: ${res.status}`);
-      }
-
       const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to query AI advisor");
 
       const matched = sites.find((s) => s.id === data.selectedSiteId);
-      if (matched) setSelectedSiteId(matched.id);
+      if (matched) handleSelectSite(matched);
       setRoverReply(data.reasoning || "TARGET ACQUIRED.");
     } catch (err) {
       console.warn("AI Rover Advisor fallback:", err);
@@ -652,7 +1065,7 @@ export default function MissionControlPage() {
       })[0];
 
       if (winner) {
-        setSelectedSiteId(winner.id);
+        handleSelectSite(winner);
         setRoverReply(
           `FALLBACK MODE ENGAGED. Selected ${winner.name} (${winner.sunlight_percent}% Sun, ${winner.comms_window_hours}h/day LoS, ${winner.slope_deg}° slope).`
         );
@@ -670,6 +1083,22 @@ export default function MissionControlPage() {
     MARKER_SHAPES.find((s) => s.id === markerShape)?.label ?? "RETICLE";
 
   const bottomLeftOffsetClass = isSidebarOpen ? "left-[392px]" : "left-[72px]";
+
+  const filteredTraffic = useMemo(
+    () =>
+      trafficFilter === "ALL"
+        ? selectedSiteTraffic
+        : selectedSiteTraffic.filter((item) => item.status === trafficFilter),
+    [selectedSiteTraffic, trafficFilter]
+  );
+
+  const proximityConflictsCount = useMemo(
+    () =>
+      selectedSiteTraffic.filter(
+        (m) => m.status !== "PAST" && m.separationKm <= siteIntervalKm
+      ).length,
+    [selectedSiteTraffic, siteIntervalKm]
+  );
 
   return (
     <main className="relative h-screen w-screen overflow-hidden bg-[#090b16] font-sans text-slate-100 selection:bg-indigo-300/30">
@@ -696,6 +1125,25 @@ export default function MissionControlPage() {
           filter: invert(0.8) sepia(0.3) saturate(2) hue-rotate(200deg);
           cursor: pointer;
         }
+        input[type="range"].lunav-slider {
+          -webkit-appearance: none;
+          appearance: none;
+          height: 4px;
+          border-radius: 9999px;
+          background: rgba(165, 180, 252, 0.2);
+          outline: none;
+        }
+        input[type="range"].lunav-slider::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 14px;
+          height: 14px;
+          border-radius: 9999px;
+          background: #c4b5fd;
+          border: 2px solid #0f1328;
+          box-shadow: 0 0 10px rgba(196, 181, 253, 0.9);
+          cursor: pointer;
+        }
       `}</style>
 
       {/* 1. Base Map Layer */}
@@ -715,6 +1163,9 @@ export default function MissionControlPage() {
             markerShape={markerShape}
             isPinDropMode={isPinDropMode}
             pinnedSiteIds={allPinnedIds}
+            siteIntervalKm={siteIntervalKm}
+            siteTraffic={selectedSiteTraffic}
+            highlightedTrafficId={expandedMissionId}
             onSelectSite={handleSelectSite}
             onMapClickPin={handleMapClickPin}
             onCenterChange={setMapCenterCoords}
@@ -859,13 +1310,13 @@ export default function MissionControlPage() {
         </div>
       </nav>
 
-      {/* 3. Slide-out Left Sidebar (Search, Pinning & Candidate List) */}
+      {/* 3. Slide-out Left Sidebar (Search, Pinning, More Settings & Candidate List) */}
       <aside
         className={`fixed top-0 bottom-0 left-14 z-40 flex w-80 flex-col border-r border-indigo-300/15 bg-[#0f1328]/80 p-5 backdrop-blur-xl transition-transform duration-300 ease-out ${
           isSidebarOpen ? "translate-x-0" : "-translate-x-full"
         }`}
       >
-        <div className="mb-6 flex items-center justify-between">
+        <div className="mb-5 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="flex h-9 w-9 items-center justify-center rounded-full border border-indigo-300/45 bg-indigo-400/20 shadow-[0_0_18px_rgba(165,180,252,0.28)]">
               <Compass className="h-4 w-4 text-indigo-200 drop-shadow-[0_0_8px_rgba(199,210,254,0.95)]" />
@@ -892,7 +1343,7 @@ export default function MissionControlPage() {
         </div>
 
         {/* Custom Styled Mission Epoch Dropdown */}
-        <div className="mb-5 space-y-2" ref={epochDropdownRef}>
+        <div className="mb-4 space-y-2" ref={epochDropdownRef}>
           <div className="flex items-center gap-2 font-mono text-[10px] font-semibold tracking-widest text-indigo-200/70">
             <Calendar className="h-3.5 w-3.5 text-indigo-300 drop-shadow-[0_0_6px_rgba(165,180,252,0.75)]" />{" "}
             MISSION EPOCH
@@ -902,7 +1353,7 @@ export default function MissionControlPage() {
             <button
               type="button"
               onClick={() => setIsEpochMenuOpen((o) => !o)}
-              className="flex w-full items-center justify-between rounded-2xl border border-indigo-300/20 bg-[#171c38]/80 px-4 py-2.5 font-mono text-xs text-indigo-100 transition hover:border-indigo-300/45 focus:border-indigo-300 focus:outline-none"
+              className="flex w-full items-center justify-between rounded-2xl border border-indigo-300/20 bg-[#171c38]/80 px-4 py-2 font-mono text-xs text-indigo-100 transition hover:border-indigo-300/45 focus:border-indigo-300 focus:outline-none"
             >
               <span>{activeEpochLabel}</span>
               <ChevronDown
@@ -962,7 +1413,7 @@ export default function MissionControlPage() {
         </div>
 
         {/* Target Coordinates & Pin Controls */}
-        <div className="mb-5 space-y-2">
+        <div className="mb-4 space-y-2">
           <div className="flex items-center justify-between">
             <span className="flex items-center gap-2 font-mono text-[10px] font-semibold tracking-widest text-indigo-200/70">
               <MapPin className="h-3.5 w-3.5 text-indigo-300 drop-shadow-[0_0_6px_rgba(165,180,252,0.75)]" />{" "}
@@ -1068,6 +1519,92 @@ export default function MissionControlPage() {
           </button>
         </div>
 
+        {/* Collapsible "More Settings" Section (Landing Site Exclusion Interval & Timezone Selector) */}
+        <div className="mb-4 rounded-2xl border border-indigo-300/20 bg-[#141830]/75 p-2.5">
+          <button
+            type="button"
+            onClick={() => setIsMoreSettingsOpen((prev) => !prev)}
+            className="flex w-full items-center justify-between font-mono text-[10px] font-bold tracking-widest text-indigo-200 transition hover:text-white"
+          >
+            <span className="flex items-center gap-2">
+              <SlidersHorizontal className="h-3.5 w-3.5 text-violet-300 drop-shadow-[0_0_6px_rgba(196,181,253,0.85)]" />
+              MORE SETTINGS
+            </span>
+            <span className="flex items-center gap-1.5 text-[9px] text-indigo-300/80">
+              <span>
+                {siteIntervalKm}KM • {activeTimezoneOption.short}
+              </span>
+              <ChevronDown
+                className={`h-3.5 w-3.5 transition-transform duration-200 ${
+                  isMoreSettingsOpen ? "rotate-180" : ""
+                }`}
+              />
+            </span>
+          </button>
+
+          {isMoreSettingsOpen && (
+            <div className="mt-3 space-y-3 border-t border-indigo-300/15 pt-3">
+              {/* Landing Site Exclusion / Interval Slider */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between font-mono text-[9px] tracking-wider">
+                  <span className="text-indigo-200/80">
+                    SITE EXCLUSION INTERVAL
+                  </span>
+                  <span className="rounded-full bg-violet-400/20 px-2 py-0.5 font-bold text-violet-200">
+                    {siteIntervalKm} KM
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={5}
+                  max={150}
+                  step={5}
+                  value={siteIntervalKm}
+                  onChange={(e) => setSiteIntervalKm(Number(e.target.value))}
+                  className="lunav-slider w-full"
+                />
+                <div className="flex justify-between font-mono text-[8px] text-slate-400">
+                  <span>5 KM</span>
+                  <span>75 KM</span>
+                  <span>150 KM</span>
+                </div>
+                <p className="font-mono text-[8px] leading-relaxed text-indigo-200/60">
+                  Sets minimum separation radius on the 2D map & flags nearby
+                  spacecraft inside {siteIntervalKm} km.
+                </p>
+              </div>
+
+              {/* Timezone Selector */}
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-1.5 font-mono text-[9px] tracking-wider text-indigo-200/80">
+                  <Clock className="h-3 w-3 text-indigo-300" />
+                  <span>TELEMETRY TIMEZONE</span>
+                </div>
+                <div className="grid grid-cols-3 gap-1">
+                  {TIMEZONE_OPTIONS.map((tz) => {
+                    const active = tz.id === selectedTimezoneId;
+                    return (
+                      <button
+                        key={tz.id}
+                        type="button"
+                        onClick={() => setSelectedTimezoneId(tz.id)}
+                        className={`rounded-xl border py-1.5 font-mono text-[9px] font-bold tracking-wider transition ${
+                          active
+                            ? "border-indigo-300/60 bg-indigo-400/25 text-indigo-100 shadow-[0_0_10px_rgba(165,180,252,0.25)]"
+                            : "border-white/5 bg-[#171c38]/80 text-slate-400 hover:border-indigo-300/30 hover:text-indigo-200"
+                        }`}
+                        title={tz.label}
+                      >
+                        {tz.short}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
         {/* Ranked Options List */}
         <div className="lunav-scroll flex-1 space-y-2.5 overflow-y-auto pr-1.5">
           <div className="sticky top-0 z-10 flex items-center justify-between bg-[#0f1328]/95 pt-1 pb-2 font-mono text-[10px] font-semibold tracking-widest text-indigo-200/70 backdrop-blur">
@@ -1087,7 +1624,7 @@ export default function MissionControlPage() {
             return (
               <div
                 key={site.id}
-                onClick={() => setSelectedSiteId(site.id)}
+                onClick={() => handleSelectSite(site)}
                 className={`cursor-pointer rounded-2xl border p-3.5 transition-all ${
                   selectedSiteId === site.id
                     ? "border-indigo-300/60 bg-indigo-400/20 shadow-[0_0_20px_rgba(165,180,252,0.18)]"
@@ -1156,9 +1693,9 @@ export default function MissionControlPage() {
         </div>
       </aside>
 
-      {/* 4. Right Popup (Selected Site Detail + Surface Horizon Side View of Earth & Sunlight) */}
+      {/* 4. Right Popup (Selected Site Detail + Horizon Side View + Clickable Lunar Traffic) */}
       {selectedSite && (
-        <aside className="lunav-scroll fixed top-6 right-6 z-40 max-h-[calc(100vh-145px)] w-[290px] overflow-y-auto rounded-3xl border border-indigo-300/25 bg-[#0f1328]/85 p-4 shadow-[0_12px_40px_rgba(15,23,42,0.65)] backdrop-blur-xl">
+        <aside className="lunav-scroll fixed top-6 right-6 z-40 max-h-[calc(100vh-145px)] w-[310px] overflow-y-auto rounded-3xl border border-indigo-300/25 bg-[#0f1328]/88 p-4 shadow-[0_12px_40px_rgba(15,23,42,0.65)] backdrop-blur-xl">
           <div className="flex items-center justify-between border-b border-indigo-300/15 pb-3">
             <div className="pr-2">
               <div className="font-mono text-[9px] tracking-widest text-indigo-300/80">
@@ -1203,7 +1740,7 @@ export default function MissionControlPage() {
             </div>
           </div>
 
-          <div className="mt-3.5 h-24 w-full overflow-hidden rounded-2xl border border-indigo-300/20">
+          <div className="mt-3.5 h-20 w-full overflow-hidden rounded-2xl border border-indigo-300/20">
             <MoonMap2D
               mode="thumbnail"
               sites={[selectedSite]}
@@ -1237,9 +1774,147 @@ export default function MissionControlPage() {
                 {selectedSite.comms_window_hours}H/DAY
               </span>
             </div>
-            <div className="flex justify-between">
+            <div className="flex justify-between border-b border-white/5 pb-1.5">
               <span className="text-slate-400">MEAN SLOPE</span>
               <span className="text-rose-300">{selectedSite.slope_deg}°</span>
+            </div>
+          </div>
+
+          {/* Clickable Lunar Traffic: Planned, Active & Past Missions */}
+          <div className="mt-3.5 rounded-2xl border border-indigo-300/20 bg-[#080a16]/90 p-2.5">
+            <div className="flex items-center justify-between font-mono text-[9px] tracking-widest">
+              <span className="font-bold text-indigo-200">
+                LUNAR TRAFFIC ({selectedSiteTraffic.length})
+              </span>
+              {proximityConflictsCount > 0 ? (
+                <span className="flex items-center gap-1 rounded-full bg-amber-300/15 px-2 py-0.5 text-[8px] font-bold text-amber-200">
+                  <AlertTriangle className="h-2.5 w-2.5" />
+                  {proximityConflictsCount} &lt; {siteIntervalKm}KM
+                </span>
+              ) : (
+                <span className="rounded-full bg-emerald-400/15 px-2 py-0.5 text-[8px] text-emerald-300">
+                  CLEAR &gt; {siteIntervalKm}KM
+                </span>
+              )}
+            </div>
+
+            {/* Traffic Status Filter Pills */}
+            <div className="mt-2 flex gap-1">
+              {(["ALL", "PLANNED", "ACTIVE", "PAST"] as const).map((tab) => (
+                <button
+                  key={tab}
+                  type="button"
+                  onClick={() => setTrafficFilter(tab)}
+                  className={`flex-1 rounded-lg py-1 font-mono text-[8px] font-bold tracking-wider transition ${
+                    trafficFilter === tab
+                      ? "bg-indigo-400/25 text-indigo-100"
+                      : "bg-[#141830]/80 text-slate-400 hover:text-indigo-200"
+                  }`}
+                >
+                  {tab}
+                </button>
+              ))}
+            </div>
+
+            {/* Clickable Mission Traffic List */}
+            <div className="mt-2 space-y-1.5">
+              {filteredTraffic.map((mission) => {
+                const isInsideInterval =
+                  mission.status !== "PAST" &&
+                  mission.separationKm <= siteIntervalKm;
+                const isExpanded = expandedMissionId === mission.id;
+
+                return (
+                  <div
+                    key={mission.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() =>
+                      setExpandedMissionId((prev) =>
+                        prev === mission.id ? null : mission.id
+                      )
+                    }
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setExpandedMissionId((prev) =>
+                          prev === mission.id ? null : mission.id
+                        );
+                      }
+                    }}
+                    className={`cursor-pointer rounded-xl border p-2 font-mono transition-all ${
+                      isExpanded
+                        ? "border-fuchsia-300/55 bg-[#1a1738] shadow-[0_0_16px_rgba(192,132,252,0.2)]"
+                        : isInsideInterval
+                        ? "border-amber-200/35 bg-amber-300/10 hover:border-amber-200/60"
+                        : "border-white/5 bg-[#12162e]/85 hover:border-indigo-300/35 hover:bg-[#171c3a]"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="truncate text-[10px] font-bold text-indigo-50">
+                        {mission.spacecraft}
+                      </span>
+                      <div className="flex shrink-0 items-center gap-1">
+                        <span
+                          className={`rounded-full px-1.5 py-0.5 text-[8px] font-bold ${
+                            mission.status === "PLANNED"
+                              ? "bg-fuchsia-400/20 text-fuchsia-200"
+                              : mission.status === "ACTIVE"
+                              ? "bg-emerald-400/20 text-emerald-300"
+                              : "bg-slate-500/20 text-slate-300"
+                          }`}
+                        >
+                          {mission.status}
+                        </span>
+                        <ChevronDown
+                          className={`h-3 w-3 text-indigo-300/70 transition-transform duration-200 ${
+                            isExpanded ? "rotate-180 text-fuchsia-200" : ""
+                          }`}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="mt-0.5 flex items-center justify-between text-[8px] text-slate-400">
+                      <span>{mission.agency}</span>
+                      <span>
+                        {mission.windowOrDate} • {mission.separationKm} KM
+                      </span>
+                    </div>
+
+                    <div className="mt-1 text-[8px] text-indigo-200/75">
+                      {mission.note}
+                    </div>
+
+                    {/* Expanded Brief Mission Description Drawer */}
+                    {isExpanded && (
+                      <div className="mt-2 space-y-1.5 border-t border-indigo-300/20 pt-2 text-[8.5px] leading-relaxed">
+                        <div className="flex items-center justify-between text-[8px] font-bold tracking-wider text-fuchsia-200">
+                          <span>OBJ: {mission.objective.toUpperCase()}</span>
+                        </div>
+                        <p className="text-slate-200">
+                          {mission.briefDescription}
+                        </p>
+                        <div className="flex items-center justify-between pt-0.5 text-[8px] text-indigo-300/80">
+                          <span>BEARING {mission.bearingDeg}°</span>
+                          <span
+                            className={
+                              isInsideInterval
+                                ? "font-bold text-amber-200"
+                                : "text-emerald-300"
+                            }
+                          >
+                            {mission.status === "PAST"
+                              ? "HISTORICAL ARCHIVE"
+                              : isInsideInterval
+                              ? `INSIDE ${siteIntervalKm}KM ZONE`
+                              : `OUTSIDE ${siteIntervalKm}KM ZONE`}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
         </aside>
@@ -1282,7 +1957,12 @@ export default function MissionControlPage() {
         <div className="fixed top-6 left-1/2 z-40 flex -translate-x-1/2 gap-1 rounded-full border border-indigo-300/25 bg-[#0f1328]/80 p-1 shadow-[0_8px_24px_rgba(15,23,42,0.45)] backdrop-blur-xl">
           <button
             type="button"
-            onClick={() => setProjectionMode("EQ")}
+            onClick={() => {
+              setProjectionMode("EQ");
+              if (selectedSite && selectedSite.lat < -65) {
+                setSelectedSiteId(null);
+              }
+            }}
             className={`rounded-full px-4 py-1.5 font-mono text-[10px] font-bold tracking-widest transition ${
               projectionMode === "EQ"
                 ? "bg-indigo-400/25 text-indigo-100 shadow-[0_0_14px_rgba(165,180,252,0.3)]"
@@ -1360,8 +2040,9 @@ export default function MissionControlPage() {
         <div className="flex items-center gap-3 rounded-full border border-indigo-300/30 bg-[#0f1328]/85 px-4 py-2 shadow-[0_8px_24px_rgba(15,23,42,0.45)] backdrop-blur-xl">
           <Orbit className="h-4 w-4 animate-[spin_4s_linear_infinite] text-indigo-200 drop-shadow-[0_0_8px_rgba(165,180,252,0.9)]" />
           <div className="font-mono text-xs font-bold tracking-wider text-indigo-100">
-            <LiveUtcText
+            <LiveClockText
               initialMs={activeTimestampMs}
+              timezoneOption={activeTimezoneOption}
               subscribe={subscribeEpoch}
             />
           </div>
@@ -1404,19 +2085,19 @@ export default function MissionControlPage() {
               }`}
             />
           </button>
-          <button
+<button
             type="button"
-            onClick={() => setTimeScale(100)}
+            onClick={() => setTimeScale(10000)}
             className={`rounded-full p-1.5 transition ${
-              timeScale === 100
+              timeScale === 10000
                 ? "bg-indigo-400/25 text-indigo-100 shadow-[0_0_10px_rgba(165,180,252,0.28)]"
                 : "text-slate-400 hover:text-indigo-200"
             }`}
-            title="Fast Forward 100x"
+            title="Fast Forward 10,000x (~2.8 hrs/sec)"
           >
             <FastForward
               className={`h-3 w-3 ${
-                timeScale === 100
+                timeScale === 10000
                   ? "drop-shadow-[0_0_5px_rgba(199,210,254,0.9)]"
                   : ""
               }`}
@@ -1424,24 +2105,24 @@ export default function MissionControlPage() {
           </button>
           <button
             type="button"
-            onClick={() => setTimeScale(1000)}
+            onClick={() => setTimeScale(250000)}
             className={`flex items-center -space-x-1.5 rounded-full px-2 py-1.5 transition ${
-              timeScale === 1000
+              timeScale === 250000
                 ? "bg-violet-400/30 text-violet-100 shadow-[0_0_12px_rgba(196,181,253,0.32)]"
                 : "text-slate-400 hover:text-indigo-200"
             }`}
-            title="Planetary Warp 1000x"
+            title="Planetary Warp 250,000x (~2.9 days/sec)"
           >
             <FastForward
               className={`h-3 w-3 ${
-                timeScale === 1000
+                timeScale === 250000
                   ? "drop-shadow-[0_0_5px_rgba(221,214,254,0.95)]"
                   : ""
               }`}
             />
             <FastForward
               className={`h-3 w-3 ${
-                timeScale === 1000
+                timeScale === 250000
                   ? "drop-shadow-[0_0_5px_rgba(221,214,254,0.95)]"
                   : ""
               }`}

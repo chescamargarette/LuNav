@@ -21,8 +21,35 @@ import { getLunarCelestialAngles } from "@/utils/lunarEphemeris";
 
 export type SpaceMarkerShape = "reticle" | "lander" | "diamond";
 
+export interface TrafficMapItem {
+  id: string;
+  spacecraft: string;
+  status: "PLANNED" | "ACTIVE" | "PAST";
+  separationKm: number;
+  bearingDeg: number;
+}
+
 const MOON_TREK_EQ_WMTS =
   "https://trek.nasa.gov/tiles/Moon/EQ/LRO_WAC_Mosaic_Global_303ppd_v02/1.0.0/default/default028mm/{z}/{y}/{x}.jpg";
+
+const LUNAR_KM_PER_DEG = 30.3233;
+
+function offsetLunarLatLon(
+  lat: number,
+  lon: number,
+  distanceKm: number,
+  bearingDeg: number
+): [number, number] {
+  const rad = (bearingDeg * Math.PI) / 180;
+  const dLat = (distanceKm / LUNAR_KM_PER_DEG) * Math.cos(rad);
+  const cosLat = Math.max(0.14, Math.cos((lat * Math.PI) / 180));
+  const dLon = (distanceKm / (LUNAR_KM_PER_DEG * cosLat)) * Math.sin(rad);
+  const nextLat = Math.max(-89.9, Math.min(89.9, lat + dLat));
+  let nextLon = lon + dLon;
+  while (nextLon > 180) nextLon -= 360;
+  while (nextLon < -180) nextLon += 360;
+  return [nextLat, nextLon];
+}
 
 const LunarSouthPoleCRS = L.extend({}, L.CRS.Simple, {
   projection: {
@@ -363,6 +390,9 @@ export interface MoonMap2DProps {
   markerShape?: SpaceMarkerShape;
   isPinDropMode?: boolean;
   pinnedSiteIds?: string[];
+  siteIntervalKm?: number;
+  siteTraffic?: TrafficMapItem[];
+  highlightedTrafficId?: string | null;
   onSelectSite?: (site: LandingSite) => void;
   onPickCoords?: (coords: { lat: number; lon: number }) => void;
   onMapClickPin?: (coords: { lat: number; lon: number }) => void;
@@ -387,6 +417,9 @@ function MoonMap2DComponent({
   markerShape = "reticle",
   isPinDropMode = false,
   pinnedSiteIds = [],
+  siteIntervalKm = 25,
+  siteTraffic = [],
+  highlightedTrafficId = null,
   onSelectSite = () => {},
   onPickCoords = () => {},
   onMapClickPin,
@@ -407,9 +440,13 @@ function MoonMap2DComponent({
   const timeScaleRef = useRef<number>(timeScale);
   const baseEpochRef = useRef<number>(activeTimestampMs);
   const simEpochRef = useRef<number>(activeTimestampMs);
+  const sitesRef = useRef<LandingSite[]>(sites);
   const selectedSiteRef = useRef<LandingSite | null>(selectedSite);
   const projectionModeRef = useRef<"EQ" | "SP">(projectionMode);
   const showSolarShadowsRef = useRef<boolean>(showSolarShadows);
+  const siteIntervalKmRef = useRef<number>(siteIntervalKm);
+  const siteTrafficRef = useRef<TrafficMapItem[]>(siteTraffic);
+  const highlightedTrafficIdRef = useRef<string | null>(highlightedTrafficId);
   const onEpochUpdateRef = useRef(onEpochUpdate);
   const isPinDropModeRef = useRef<boolean>(isPinDropMode);
   const onMapClickPinRef = useRef(onMapClickPin);
@@ -418,6 +455,10 @@ function MoonMap2DComponent({
   useEffect(() => {
     timeScaleRef.current = timeScale;
   }, [timeScale]);
+
+  useEffect(() => {
+    sitesRef.current = sites;
+  }, [sites]);
 
   useEffect(() => {
     selectedSiteRef.current = selectedSite;
@@ -430,6 +471,21 @@ function MoonMap2DComponent({
   useEffect(() => {
     showSolarShadowsRef.current = showSolarShadows;
   }, [showSolarShadows]);
+
+  useEffect(() => {
+    siteIntervalKmRef.current = siteIntervalKm;
+    drawSolarOverlay.current();
+  }, [siteIntervalKm]);
+
+  useEffect(() => {
+    siteTrafficRef.current = siteTraffic;
+    drawSolarOverlay.current();
+  }, [siteTraffic]);
+
+  useEffect(() => {
+    highlightedTrafficIdRef.current = highlightedTrafficId;
+    drawSolarOverlay.current();
+  }, [highlightedTrafficId]);
 
   useEffect(() => {
     onEpochUpdateRef.current = onEpochUpdate;
@@ -448,11 +504,11 @@ function MoonMap2DComponent({
   }, [onCenterChange]);
 
   useEffect(() => {
-  const el = containerRef.current;
-  if (!el) return;
-  el.style.cursor =
-    mode === "picker" || isPinDropMode ? "crosshair" : "";
-}, [mode, isPinDropMode]);
+    const el = containerRef.current;
+    if (!el) return;
+    el.style.cursor =
+      mode === "picker" || isPinDropMode ? "crosshair" : "";
+  }, [mode, isPinDropMode]);
 
   useEffect(() => {
     baseEpochRef.current = activeTimestampMs;
@@ -483,6 +539,68 @@ function MoonMap2DComponent({
       active = false;
     };
   }, [mode, thumbLat, thumbLon]);
+
+  // Draw geodesic exclusion/spacing ring on the 2D map for the Landing Site Interval slider
+  const drawGeodesicIntervalRing = (
+    ctx: CanvasRenderingContext2D,
+    map: L.Map,
+    lat: number,
+    lon: number,
+    radiusKm: number,
+    isPrimary: boolean
+  ) => {
+    const centerPt = map.latLngToContainerPoint([lat, lon]);
+    ctx.save();
+    ctx.beginPath();
+    const steps = 48;
+    let edgePt = centerPt;
+    for (let i = 0; i <= steps; i++) {
+      const bearing = (i / steps) * 360;
+      const [ringLat, ringLon] = offsetLunarLatLon(lat, lon, radiusKm, bearing);
+      const pt = map.latLngToContainerPoint([ringLat, ringLon]);
+      if (i === 0) {
+        ctx.moveTo(pt.x, pt.y);
+      } else {
+        ctx.lineTo(pt.x, pt.y);
+      }
+      if (i === 12) edgePt = pt;
+    }
+    ctx.closePath();
+
+    if (isPrimary) {
+      ctx.fillStyle = "rgba(167, 139, 250, 0.08)";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(196, 181, 253, 0.78)";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([5, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      const pxRadius = Math.hypot(edgePt.x - centerPt.x, edgePt.y - centerPt.y);
+      if (pxRadius > 22) {
+        const tag = `${radiusKm} KM ZONE`;
+        ctx.font = "bold 8.5px ui-monospace, SFMono-Regular, Menlo, monospace";
+        const tagW = ctx.measureText(tag).width + 10;
+        ctx.fillStyle = "rgba(15, 19, 40, 0.88)";
+        ctx.beginPath();
+        ctx.roundRect(edgePt.x - tagW / 2, edgePt.y - 7, tagW, 14, 7);
+        ctx.fill();
+        ctx.strokeStyle = "rgba(196, 181, 253, 0.45)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.fillStyle = "#ddd6fe";
+        ctx.textAlign = "center";
+        ctx.fillText(tag, edgePt.x, edgePt.y + 3);
+      }
+    } else {
+      ctx.strokeStyle = "rgba(165, 180, 252, 0.34)";
+      ctx.lineWidth = 1.1;
+      ctx.setLineDash([4, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.restore();
+  };
 
   // Draw Real-Time Solar Terminator, Shadow Shift & Zoomed Landing Site Vectors
   const drawSolarOverlay = useRef<() => void>(() => {});
@@ -572,12 +690,24 @@ function MoonMap2DComponent({
       }
     }
 
+    const intervalKm = siteIntervalKmRef.current;
     const site = selectedSiteRef.current;
     const isSiteVisibleInProjection =
       site &&
       (isSP
         ? site.lat < -55
         : site.lat >= -70 || site.id.startsWith("pinned-"));
+
+    // When no site is selected, render exclusion interval rings around all visible candidate sites
+    if (!site || !isSiteVisibleInProjection) {
+      sitesRef.current
+        .filter((s) =>
+          isSP ? s.lat < -55 : s.lat >= -70 || s.id.startsWith("pinned-")
+        )
+        .forEach((s) => {
+          drawGeodesicIntervalRing(ctx, map, s.lat, s.lon, intervalKm, false);
+        });
+    }
 
     if (site && isSiteVisibleInProjection) {
       const sitePt = map.latLngToContainerPoint([site.lat, site.lon]);
@@ -605,6 +735,70 @@ function MoonMap2DComponent({
       ctx.arc(sitePt.x, sitePt.y, 30, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
+
+      // Draw geodesic Landing Site Interval / Exclusion Radius circle
+      drawGeodesicIntervalRing(ctx, map, site.lat, site.lon, intervalKm, true);
+
+      // Plot nearby Lunar Traffic spacecraft around the selected landing site
+      const trafficItems = siteTrafficRef.current;
+      const highlightedId = highlightedTrafficIdRef.current;
+      for (let i = 0; i < trafficItems.length; i++) {
+        const tr = trafficItems[i];
+        const [tLat, tLon] = offsetLunarLatLon(
+          site.lat,
+          site.lon,
+          tr.separationKm,
+          tr.bearingDeg
+        );
+        const tPt = map.latLngToContainerPoint([tLat, tLon]);
+        const isConflict =
+          tr.status !== "PAST" && tr.separationKm <= intervalKm;
+        const isHighlighted = tr.id === highlightedId;
+
+        ctx.save();
+        ctx.strokeStyle = isHighlighted
+          ? "rgba(245, 208, 254, 0.85)"
+          : isConflict
+          ? "rgba(253, 224, 71, 0.45)"
+          : "rgba(148, 163, 184, 0.25)";
+        ctx.lineWidth = isHighlighted ? 1.5 : 1;
+        ctx.setLineDash([2, 3]);
+        ctx.beginPath();
+        ctx.moveTo(sitePt.x, sitePt.y);
+        ctx.lineTo(tPt.x, tPt.y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        const dotColor = isHighlighted
+          ? "#f5d0fe"
+          : isConflict
+          ? "#fde047"
+          : tr.status === "ACTIVE"
+          ? "#6ee7b7"
+          : "#94a3b8";
+
+        ctx.beginPath();
+        ctx.arc(tPt.x, tPt.y, isHighlighted ? 5.5 : 3.8, 0, Math.PI * 2);
+        ctx.fillStyle = dotColor;
+        ctx.fill();
+        ctx.strokeStyle = "#090b16";
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+
+        if (map.getZoom() >= 5 || isHighlighted) {
+          ctx.font = "bold 8px ui-monospace, SFMono-Regular, Menlo, monospace";
+          const labelText = `${tr.spacecraft} (${tr.separationKm}KM)`;
+          const lw = ctx.measureText(labelText).width + 8;
+          ctx.fillStyle = "rgba(15, 19, 40, 0.88)";
+          ctx.beginPath();
+          ctx.roundRect(tPt.x - lw / 2, tPt.y - 17, lw, 12, 6);
+          ctx.fill();
+          ctx.fillStyle = dotColor;
+          ctx.textAlign = "center";
+          ctx.fillText(labelText, tPt.x, tPt.y - 8.5);
+        }
+        ctx.restore();
+      }
 
       let sunScreenAngleRad: number;
       let earthScreenAngleRad: number;
@@ -1197,8 +1391,8 @@ function MoonMap2DComponent({
         }
       `}</style>
       <div
-          ref={containerRef}
-          className="relative h-full w-full bg-[#090b16]"
+        ref={containerRef}
+        className="relative h-full w-full bg-[#090b16]"
       />
       {mode === "full" && (
         <canvas
