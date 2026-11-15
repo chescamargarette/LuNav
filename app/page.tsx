@@ -41,6 +41,11 @@ import {
 } from "@/utils/lunarEphemeris";
 import { TerrainLayerMode } from "@/utils/lunarTextures";
 import { LandingSite } from "@/data/mockSites";
+import { MISSION_REFERENCES } from "@/utils/missionReferences";
+
+// Historical touchdown locations match the Phase 3C mission reference catalog.
+const HISTORICAL_SITE_IDS = ["im1-odysseus", "im2-athena", "chandrayaan3"] as const;
+
 import type { SpaceMarkerShape, TrafficMapItem } from "@/components/MoonMap2D";
 import type { SpacecraftSpecs } from "@/utils/terrainAnalysis";
 import type {
@@ -1002,7 +1007,31 @@ export default function MissionControlPage() {
       };
     });
 
-    const combined = [...evaluatedCustomPins, ...result.sites];
+    // Retain the existing epoch/window calculation, but replace the six mock
+    // candidates with our three verified historical landing locations.
+    // Only the selected-site /api/compare analysis contains NASA Horizons
+    // outputs; values generated here remain explicitly labeled previews.
+    const historicalSites: LandingSite[] = HISTORICAL_SITE_IDS.flatMap((id) => {
+      const reference = MISSION_REFERENCES.find((mission) => mission.id === id);
+      if (!reference) return [];
+      const evaluated = evaluateCustomCoordinate(
+        reference.latDeg,
+        reference.lonDegEast,
+        whenPreset,
+        customDate,
+        referenceNowMs
+      );
+      return [{
+        ...evaluated,
+        id: reference.id,
+        name: id === "chandrayaan3" ? "Chandrayaan-3 Vikram (2023)" : reference.label,
+        region: reference.siteName,
+        lat: reference.latDeg,
+        lon: reference.lonDegEast,
+      }];
+    });
+
+    const combined = [...evaluatedCustomPins, ...historicalSites];
     const sortedWithPinsFirst = combined.sort((a, b) => {
       const aPinned =
         a.id.startsWith("pinned-") || bookmarkedSiteIds.includes(a.id) ? 1 : 0;
@@ -1138,7 +1167,9 @@ export default function MissionControlPage() {
 
 
   const selectedSiteTraffic = useMemo(
-    () => (selectedSite ? getSiteMissionTraffic(selectedSite) : []),
+    () => selectedSite && !HISTORICAL_SITE_IDS.some((id) => id === selectedSite.id)
+      ? getSiteMissionTraffic(selectedSite)
+      : [],
     [selectedSite]
   );
 
@@ -1938,10 +1969,10 @@ export default function MissionControlPage() {
           )}
         </div>
 
-        {/* Ranked Options List: preview figures are not Phase 3C mission results yet. */}
+        {/* Historical mission references; preview figures are not Phase 3C results yet. */}
         <div className="lunav-scroll flex-1 space-y-2.5 overflow-y-auto pr-1.5">
           <div className="sticky top-0 z-10 flex items-center justify-between bg-[#0f1328]/95 pt-1 pb-2 font-mono text-[10px] font-semibold tracking-widest text-indigo-200/70 backdrop-blur">
-            <span>CANDIDATE SITES ({sites.length})</span>
+            <span>HISTORICAL LANDING SITES ({HISTORICAL_SITE_IDS.length})</span>
             {allPinnedIds.length > 0 && (
               <span className="rounded-full bg-fuchsia-400/15 px-2 py-0.5 text-[9px] text-fuchsia-200">
                 {allPinnedIds.length} PINNED
@@ -1950,7 +1981,7 @@ export default function MissionControlPage() {
           </div>
 
           <p className="mb-2 font-mono text-[8px] tracking-wide text-amber-200/70">
-            PREVIEW SITE METRICS • NOT NASA-VALIDATED
+            VERIFIED LANDING COORDINATES • SUN/COMM FIGURES ARE PREVIEWS
           </p>
           {sites.map((site) => {
             const isCustomPin = site.id.startsWith("pinned-");
@@ -2203,7 +2234,11 @@ export default function MissionControlPage() {
               <span className="font-bold text-indigo-200">
                 LUNAR TRAFFIC ({selectedSiteTraffic.length}) • DEMO
               </span>
-              {proximityConflictsCount > 0 ? (
+              {HISTORICAL_SITE_IDS.some((id) => id === selectedSite.id) ? (
+                <span className="rounded-full bg-amber-300/15 px-2 py-0.5 text-[8px] text-amber-200">
+                  NOT VERIFIED
+                </span>
+              ) : proximityConflictsCount > 0 ? (
                 <span className="flex items-center gap-1 rounded-full bg-amber-300/15 px-2 py-0.5 text-[8px] font-bold text-amber-200">
                   <AlertTriangle className="h-2.5 w-2.5" />
                   {proximityConflictsCount} &lt; {siteIntervalKm}KM
@@ -2214,6 +2249,13 @@ export default function MissionControlPage() {
                 </span>
               )}
             </div>
+
+            {HISTORICAL_SITE_IDS.some((id) => id === selectedSite.id) && (
+              <p className="mt-2 text-[9px] leading-relaxed text-slate-400">
+                No verified nearby mission traffic data. Demo traffic is disabled
+                for historical landing references; this is not a separation clearance.
+              </p>
+            )}
 
             {/* Traffic Status Filter Pills */}
             <div className="mt-2 flex gap-1">
