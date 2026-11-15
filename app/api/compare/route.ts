@@ -1,96 +1,112 @@
+/** Backwards-compatible Phase 3B mission-analysis route. Does not modify the main frontend. */
 import { GET as getHorizons } from '../horizons/route';
-import { analyzeObservations, type HorizonsObservation, type HorizonProfile,
-  type SpacecraftSpecs } from '../../../utils/terrainAnalysis';
+import { resolveLolaProfile, getLolaSites } from '../../../utils/lolaCatalog';
+import { MISSION_REFERENCES, nominalTerrainCoverage } from '../../../utils/missionReferences';
+import {analyzeObservations, type HorizonsObservation, type HorizonProfile,
+  type SpacecraftSpecs} from '../../../utils/terrainAnalysis';
+import {timePlan, resampleAngles} from '../../../utils/missionTime';
+import {batteryTimeline, legsCandidateTimeline, type LegsScenario} from '../../../utils/missionDynamics';
+import {legsStationNetworkAnalysis} from '../../../utils/legsGeometry';
 
-
-type SiteRequest = { id: string; name?: string; lat: number; lon: number; horizonProfile?: HorizonProfile };
-type MissionRequest = {
-  sites: SiteRequest[];
-  startUtc: string;
-  endUtc: string;
-  stepHours?: number;
-  timezone?: string;
-  terrainMode?: 'ideal_horizon' | 'terrain_aware';
-  spacecraft?: SpacecraftSpecs;
+type SiteRequest={id:string;name?:string;lat:number;lon:number;horizonProfile?:HorizonProfile};
+type MissionRequest={
+  sites?:SiteRequest[];
+  missionReferenceId?:string;
+  startUtc:string;endUtc:string;stepHours?:number;timezone?:string;
+  terrainMode?:'ideal_horizon'|'terrain_aware';
+  spacecraft?:SpacecraftSpecs;
+  legsScenario?:LegsScenario;
 };
-const toDate = (value: string): Date => {
-  if (typeof value !== 'string' || !/^\d{4}-\d\d-\d\dT00:00:00(?:\.000)?Z$/.test(value)) {
-    throw new Error('Current Horizons adapter requires UTC midnight timestamps YYYY-MM-DDT00:00:00Z');
+function chosenSites(req:MissionRequest){
+  const ref=req.missionReferenceId?MISSION_REFERENCES.find(x=>x.id===req.missionReferenceId):null;
+  if(req.missionReferenceId&&!ref)throw new Error('Unknown historical mission ID');
+  const sites=(req.sites?.length?req.sites:ref?[{id:ref.id,name:ref.label,lat:ref.latDeg,lon:ref.lonDegEast}]:[]) as SiteRequest[];
+  if(sites.length<1||sites.length>4)throw new Error('Choose between one and four sites');
+  if(ref&&(sites.length!==1||Math.abs(sites[0].lat-ref.latDeg)>0.0001||
+      Math.abs(sites[0].lon-ref.lonDegEast)>0.0001))
+    throw new Error('Mission preset coordinates do not match provided site. Clear missionReferenceId when customizing a landing site.');
+  const ids=new Set<string>();
+  for(const site of sites){
+    if(!site||typeof site.id!=='string'||site.id.length<1||site.id.length>64||ids.has(site.id)||
+       typeof site.lat!=='number'||!Number.isFinite(site.lat)||site.lat < -90||site.lat > 90||
+       typeof site.lon!=='number'||!Number.isFinite(site.lon)||site.lon < -180||site.lon>180)
+      throw new Error('Invalid or duplicate site ID or latitude/longitude');
+    ids.add(site.id);
   }
-  const d = new Date(value);
-  if (!Number.isFinite(d.getTime()) || d.toISOString().slice(0,10) !== value.slice(0,10)) {
-    throw new Error('Invalid UTC date');
-  }
-  return d;
-};
-function validate(x: MissionRequest) {
-  if (!x || !Array.isArray(x.sites) || x.sites.length < 1 || x.sites.length > 4) {
-    throw new Error('Choose between one and four sites');
-  }
-  if (x.terrainMode && !['ideal_horizon','terrain_aware'].includes(x.terrainMode)) throw new Error('Invalid terrainMode');
-  if (x.timezone !== undefined && x.timezone !== 'UTC') throw new Error('MVP accepts UTC only; convert display times in the frontend');
-  const start = toDate(x.startUtc), end = toDate(x.endUtc);
-  const days = (end.getTime()-start.getTime())/86_400_000;
-  if (days <= 0 || days > 31) throw new Error('Mission interval must be 1–31 days');
-  const step = x.stepHours ?? 1;
-  if (!Number.isInteger(step) || step < 1 || step > 24) throw new Error('stepHours must be an integer between 1 and 24');
-  if (days*24/step + 1 > 800) throw new Error('Too many requested observations');
-  const used = new Set<string>();
-  for (const site of x.sites) {
-    if (!site || typeof site.id !== 'string' || site.id.length < 1 || site.id.length > 64
-        || used.has(site.id) || !Number.isFinite(site.lat) || !Number.isFinite(site.lon)
-        || Math.abs(site.lat) > 90 || Math.abs(site.lon) > 180) {
-      throw new Error('Invalid or duplicate site identification or coordinates');
-    }
-    used.add(site.id);
-    if ((x.terrainMode ?? 'ideal_horizon') === 'terrain_aware' && !site.horizonProfile) {
-      throw new Error(`Site ${site.id}: terrain-aware mode requires a measured/generated horizonProfile`);
-    }
-  }
-  return {start, end, step};
+  return {sites,ref};
 }
-async function retrieve(target: 'sun'|'earth', site: SiteRequest,
-  start: Date, end: Date, step: number): Promise<HorizonsObservation[]> {
-  const params = new URLSearchParams({ target, lat: String(site.lat), lon: String(site.lon),
-    start: start.toISOString().slice(0,10), stop: end.toISOString().slice(0,10), step:String(step) });
-  const url = `http://localhost/api/horizons?${params}`;
-  // Call the already working Horizons handler directly, without a network roundtrip to Vercel.
-  const response = await getHorizons(new Request(url));
-  const result = await response.json();
-  if (!response.ok) throw new Error(`Horizons ${target} failed for ${site.id}: ${String(result.error ?? response.status)}`);
-  if (!Array.isArray(result.observations)) throw new Error(`Horizons ${target} did not return observations`);
+async function retrieve(target:'sun'|'earth',site:SiteRequest,start:Date,end:Date) {
+  const params=new URLSearchParams({target,lat:String(site.lat),lon:String(site.lon),
+    start:start.toISOString().slice(0,10),stop:end.toISOString().slice(0,10),step:'1'});
+  const response=await getHorizons(new Request(`http://localhost/api/horizons?${params}`));
+  const result=await response.json();
+  if(!response.ok)throw new Error(`Horizons ${target} for ${site.id}: ${String(result.error??response.status)}`);
+  if(!Array.isArray(result.observations))throw new Error(`Horizons ${target} did not return observations`);
   return result.observations as HorizonsObservation[];
 }
-export async function POST(request: Request) {
+export async function POST(request:Request){
   try {
-    const body = await request.text();
-    if (body.length > 1_000_000) return Response.json({error:'Request too large'}, {status:413});
-    let x: MissionRequest;
-    try { x = JSON.parse(body) as MissionRequest; }
-    catch { return Response.json({error:'Invalid JSON body'}, {status:400}); }
-    let dates: ReturnType<typeof validate>;
-    try { dates = validate(x); }
-    catch (e) { return Response.json({error:String(e)}, {status:422}); }
-    const sites = [];
-    for (const site of x.sites) {
-      const [sun, earth] = await Promise.all([
-        retrieve('sun',site,dates.start,dates.end,dates.step),
-        retrieve('earth',site,dates.start,dates.end,dates.step)
-      ]);
-      let analysis: ReturnType<typeof analyzeObservations>;
-      try {
-        analysis = analyzeObservations({ sun, earth, terrainMode:x.terrainMode ?? 'ideal_horizon',
-          horizonProfile:site.horizonProfile, siteLatDeg:site.lat, siteLonDeg:site.lon,
-          spacecraft:x.spacecraft, requestedStartUtc:dates.start.toISOString(),
-          requestedEndUtc:dates.end.toISOString() });
-      } catch (e) { return Response.json({error:`Site ${site.id}: ${String(e)}`}, {status:422}); }
-      sites.push({ id:site.id, name:site.name ?? site.id, lat:site.lat, lon:site.lon, ...analysis });
+    const raw=await request.text();
+    if(raw.length>1_000_000)return Response.json({error:'Request too large'}, {status:413});
+    let x:MissionRequest;
+    try{x=JSON.parse(raw) as MissionRequest;}catch{return Response.json({error:'Invalid JSON body'}, {status:400});}
+    let plan:ReturnType<typeof timePlan>,selection:ReturnType<typeof chosenSites>;
+    try{
+      if(!x||!['ideal_horizon','terrain_aware',undefined].includes(x.terrainMode))throw new Error('Invalid terrainMode');
+      plan=timePlan(x.startUtc,x.endUtc,x.stepHours??1,x.timezone??'UTC');
+      selection=chosenSites(x);
+      if(x.legsScenario&&selection.ref?.published.communicationArchitecture==='rover_to_lander_to_earth')
+        throw new Error('Historical Chandrayaan-3 rover used a lander relay. Disable the LEGS direct scenario or clear the historical preset for hypothetical redesign.');
+    }catch(e){return Response.json({error:String(e)}, {status:422});}
+    const sites=[];
+    for(const site of selection.sites){
+      let profile=site.horizonProfile;
+      let catalogId:string|null=null;
+      if((x.terrainMode??'ideal_horizon')==='terrain_aware'&&!profile){
+        try{
+          const cached=resolveLolaProfile(site.id,site.lat,site.lon);
+          if(!cached){return Response.json({error:`Site ${site.id}: no precomputed LOLA profile. Available IDs: ${getLolaSites().map(p=>p.id).join(', ')||'none'}.`,code:'LOLA_SITE_NOT_CACHED',terrainCoverage:nominalTerrainCoverage(site.lat)}, {status:422});}
+          profile=cached.profile;catalogId=cached.id;
+        }catch(e){return Response.json({error:String(e)}, {status:422});}
+      }
+      const [sunRaw,earthRaw]=await Promise.all([
+        retrieve('sun',site,plan.ephemerisStart,plan.ephemerisEnd),
+        retrieve('earth',site,plan.ephemerisStart,plan.ephemerisEnd)]);
+      let analysis:ReturnType<typeof analyzeObservations>;
+      try{
+        const sun=resampleAngles(sunRaw,plan.times),earth=resampleAngles(earthRaw,plan.times);
+        analysis=analyzeObservations({sun,earth,terrainMode:x.terrainMode??'ideal_horizon',
+          horizonProfile:profile,siteLatDeg:site.lat,siteLonDeg:site.lon,spacecraft:x.spacecraft,
+          requestedStartUtc:plan.start.toISOString(),requestedEndUtc:plan.end.toISOString()});
+      }catch(e){return Response.json({error:`Site ${site.id}: ${String(e)}`}, {status:422});}
+      let power,legs,legsNetworkAnalysis=null;
+      try{
+        power=batteryTimeline(analysis.timeline,x.spacecraft??{});
+        legs=x.legsScenario?legsCandidateTimeline(analysis.timeline,x.legsScenario):null;
+        if(x.legsScenario?.geometry?.enabled){
+          legsNetworkAnalysis=await legsStationNetworkAnalysis({lat:site.lat,lon:site.lon,profile,
+            ideal:(x.terrainMode??'ideal_horizon')==='ideal_horizon',
+            timesMs:plan.times,scenario:x.legsScenario,geometry:x.legsScenario.geometry});
+        }
+      }catch(e){return Response.json({error:`Mission models for ${site.id}: ${String(e)}`}, {status:422});}
+      sites.push({id:site.id,name:site.name??site.id,lat:site.lat,lon:site.lon,
+        terrainCatalogId:catalogId,...analysis,energySimulation:power,legsAnalysis:legs,legsNetworkAnalysis,
+        assumptions:{...analysis.assumptions,dataQuality:catalogId
+          ?'NASA LOLA DEM-derived precomputed catalog; independent geometry validation pending'
+          :analysis.assumptions.dataQuality}});
     }
-    return Response.json({ application:'LuNav', source:'NASA JPL Horizons',
-      requestedStartUtc:dates.start.toISOString(), requestedEndUtc:dates.end.toISOString(),
-      stepHours:dates.step, sites,
-      warnings:['Compare site percentages only over the same fully covered time intervals. Terrain profiles are not fetched automatically.'] });
-  } catch(e) {
-    return Response.json({error:String(e)}, {status:502});
-  }
+    const ref=selection.ref;
+    return Response.json({application:'LuNav',apiVersion:'3c-geometry-preview',source:'NASA JPL Horizons',
+      requestedStartUtc:plan.start.toISOString(),requestedEndUtc:plan.end.toISOString(),
+      displayTimezone:plan.timezone,stepHours:plan.stepHours,
+      ephemerisSamplingMethod:plan.method,missionReference:ref?{
+        id:ref.id,label:ref.label,landingDateUtc:ref.landingDateUtc,
+        published:ref.published,warnings:ref.warnings,sourceUrls:ref.sourceUrls,
+        note:'Spacecraft parameters in this analysis are user inputs, not automatically verified historical specifications.'}:null,
+      sites,
+      warnings:['Terrain is loaded from precomputed geolocated profiles, not GeoTIFFs on the deployed server.',
+        'NASA ephemeris samples are retrieved at one-hour cadence; finer steps and off-hour times are linearly interpolated approximations.',
+        'Legacy legsAnalysis uses assumed range; legsNetworkAnalysis uses actual JPL Horizons station-specific slant range and predicted geometry when enabled.',
+        'Unknown historical spacecraft values remain unknown; spacecraft inputs are user assumptions.']});
+  }catch(e){return Response.json({error:e instanceof Error?e.message:String(e)}, {status:502});}
 }

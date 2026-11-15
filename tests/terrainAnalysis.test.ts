@@ -45,3 +45,31 @@ const ridge = terrainApparentDirection({latDeg:0,lonDeg:0,elevationM:0,observerH
 assert.ok(ridge !== null && ridge.azimuthDeg > 89.99 && ridge.azimuthDeg < 90.01);
 assert.ok(ridge !== null && ridge.horizonElevationDeg > 0.38 && ridge.horizonElevationDeg < 0.44);
 console.log('PASS: profile seam, coordinate guard, crossing integration, power, RF/LOS and missing terrain tests');
+import { generatedLolaCatalog } from '../utils/generatedLolaCatalog';
+import { resolveLolaProfile, getLolaSites } from '../utils/lolaCatalog';
+const mockLola: HorizonProfile = {
+  ...profile,
+  metadata: { siteElevationM: -716.097, approxLocalSlopeDeg: 6.629, terrainSearchRadiusKm:30,
+    footprintProjectedAreaM2:780800, footprintSurfaceAreaM2:796000, footprintRadiusM:500 }
+};
+generatedLolaCatalog['demo'] = mockLola;
+const match = resolveLolaProfile('demo', -89.5, 0);
+assert.ok(match !== null);
+assert.equal(getLolaSites().length, 1);
+assert.throws(()=>resolveLolaProfile('demo', -80, 0), /do not match/);
+const metadataResult=analyzeObservations({...base,terrainMode:'terrain_aware',horizonProfile:mockLola,
+  spacecraft:{solarPanelAreaM2:1, solarPanelEfficiency:0.25, batteryCapacityWh: 200, averageElectricalLoadW:50,
+    radioFrequencyMHz:2200, transmitterPowerDbm:30, transmitterAntennaGainDbi:10,
+    transmitterCableLossDb:1, receiverGainDbi:35, receiverBandwidthHz:100000,
+    receiverNoiseFigureDb:3, requiredSnrDb:8, earthDistanceKm:384400,
+    polarizationLossDb:1, pointingLossDb:2, otherLinkLossDb:2}});
+assert.equal(metadataResult.terrain.siteElevationM, -716.097);
+assert.equal(metadataResult.terrain.localSlopeDeg, 6.629);
+assert.equal(metadataResult.terrain.footprintSurfaceAreaM2, 796000);
+assert.equal(metadataResult.linkBudget.effectiveEirpDbm, 39);
+assert.equal(metadataResult.linkBudget.aggregateOtherLossDb, 5);
+assert.equal(metadataResult.energy.batteryEnduranceHours, 4);
+assert.equal(metadataResult.energy.batterySurvivesLongestDarkness, true);
+assert.ok(metadataResult.linkBudget.sensitivityDbm !== null && metadataResult.linkBudget.sensitivityDbm < -110);
+delete generatedLolaCatalog['demo'];
+console.log('PASS: automatic LOLA catalog, metadata, spacecraft-derived RF margin and battery endurance');

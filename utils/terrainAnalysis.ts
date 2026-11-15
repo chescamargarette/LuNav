@@ -12,6 +12,16 @@ export type HorizonProfile = {
     siteLongitudeDeg: number;
     method?: string;
   };
+  metadata?: {
+    siteElevationM?: number | null;
+    approxLocalSlopeDeg?: number | null;
+    terrainSearchRadiusKm?: number | null;
+    radialSamplingMeters?: number | null;
+    azimuthSamplingDegrees?: number | null;
+    footprintSurfaceAreaM2?: number | null;
+    footprintProjectedAreaM2?: number | null;
+    footprintRadiusM?: number | null;
+  };
 };
 export type HorizonsObservation = {
   time: string;
@@ -41,6 +51,9 @@ export type EphemerisRow = {
   receivedPowerDbm: number | null;
   linkMarginDb: number | null;
   linkFeasible: boolean | null;
+  linkEirpDbm: number | null;
+  linkSensitivityDbm: number | null;
+  linkOtherLossDb: number | null;
 };
 export type SpacecraftSpecs = {
   solarPanelAreaM2?: number;
@@ -59,6 +72,21 @@ export type SpacecraftSpecs = {
   maxEarthBlackoutHours?: number;
   minSunlightPercent?: number;
   minEarthLosPercent?: number;
+  batteryCapacityWh?: number;
+  averageElectricalLoadW?: number;
+  initialBatterySocPercent?: number;
+  batteryReservePercent?: number;
+  batteryChargeEfficiency?: number;
+  batteryDischargeEfficiency?: number;
+  transmitterPowerDbm?: number;
+  transmitterAntennaGainDbi?: number;
+  transmitterCableLossDb?: number;
+  receiverNoiseFigureDb?: number;
+  receiverBandwidthHz?: number;
+  requiredSnrDb?: number;
+  polarizationLossDb?: number;
+  pointingLossDb?: number;
+  implementationLossDb?: number;
 };
 export type VisibilitySegment = {
   startUtc: string;
@@ -155,7 +183,19 @@ function validateSpacecraft(s: SpacecraftSpecs): void {
      || (s.earthDistanceKm !== undefined && s.earthDistanceKm <= 0)
      || (s.otherLinkLossDb !== undefined && s.otherLinkLossDb < 0)
      || (s.maxDarknessHours !== undefined && s.maxDarknessHours < 0)
-     || (s.maxEarthBlackoutHours !== undefined && s.maxEarthBlackoutHours < 0)) {
+     || (s.maxEarthBlackoutHours !== undefined && s.maxEarthBlackoutHours < 0)
+     || (s.batteryCapacityWh !== undefined && s.batteryCapacityWh <= 0)
+     || (s.averageElectricalLoadW !== undefined && s.averageElectricalLoadW < 0)
+     || (s.initialBatterySocPercent !== undefined && (s.initialBatterySocPercent < 0 || s.initialBatterySocPercent > 100))
+     || (s.batteryReservePercent !== undefined && (s.batteryReservePercent < 0 || s.batteryReservePercent > 100))
+     || (s.batteryChargeEfficiency !== undefined && (s.batteryChargeEfficiency <= 0 || s.batteryChargeEfficiency > 1))
+     || (s.batteryDischargeEfficiency !== undefined && (s.batteryDischargeEfficiency <= 0 || s.batteryDischargeEfficiency > 1))
+     || (s.transmitterCableLossDb !== undefined && s.transmitterCableLossDb < 0)
+     || (s.receiverNoiseFigureDb !== undefined && s.receiverNoiseFigureDb < 0)
+     || (s.receiverBandwidthHz !== undefined && s.receiverBandwidthHz <= 0)
+     || (s.polarizationLossDb !== undefined && s.polarizationLossDb < 0)
+     || (s.pointingLossDb !== undefined && s.pointingLossDb < 0)
+     || (s.implementationLossDb !== undefined && s.implementationLossDb < 0)) {
     throw new Error('Invalid spacecraft constraint range');
   }
   for (const percent of [s.minSunlightPercent, s.minEarthLosPercent]) {
@@ -186,9 +226,24 @@ export function analyzeObservations(args: {
   if (!['ideal_horizon', 'terrain_aware'].includes(terrainMode)) throw new Error('Unknown terrain mode');
   const earthByTime = new Map(earth.map(x => [parseHorizonsUtc(x.time), x]));
   const canPower = spacecraft.solarPanelAreaM2 !== undefined && spacecraft.solarPanelEfficiency !== undefined;
-  const canLink = [spacecraft.radioFrequencyMHz, spacecraft.transmitterEirpDbm,
-    spacecraft.receiverGainDbi, spacecraft.receiverSensitivityDbm, spacecraft.earthDistanceKm]
-    .every(x => x !== undefined);
+  // Preserve direct-EIRP + measured-sensitivity inputs from Mode 1-3.
+  // Optionally derive EIRP from radio power and antenna gain, and derive sensitivity
+  // from kTB + noise figure + required SNR (290 K receiver reference temperature).
+  const eirpDbm = spacecraft.transmitterEirpDbm ?? (
+    spacecraft.transmitterPowerDbm !== undefined && spacecraft.transmitterAntennaGainDbi !== undefined
+      ? spacecraft.transmitterPowerDbm + spacecraft.transmitterAntennaGainDbi - (spacecraft.transmitterCableLossDb ?? 0)
+      : null);
+  const receiverSensitivityDbm = spacecraft.receiverSensitivityDbm ?? (
+    spacecraft.receiverBandwidthHz !== undefined && spacecraft.receiverNoiseFigureDb !== undefined
+      && spacecraft.requiredSnrDb !== undefined
+      ? -173.975 + 10 * Math.log10(spacecraft.receiverBandwidthHz)
+          + spacecraft.receiverNoiseFigureDb + spacecraft.requiredSnrDb
+      : null);
+  const otherLossDb = (spacecraft.otherLinkLossDb ?? 0) + (spacecraft.polarizationLossDb ?? 0)
+    + (spacecraft.pointingLossDb ?? 0) + (spacecraft.implementationLossDb ?? 0);
+  const canLink = spacecraft.radioFrequencyMHz !== undefined && eirpDbm !== null
+    && spacecraft.receiverGainDbi !== undefined && receiverSensitivityDbm !== null
+    && spacecraft.earthDistanceKm !== undefined;
   const startMs = Date.parse(requestedStartUtc);
   const endMs = Date.parse(requestedEndUtc);
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs >= endMs) throw new Error('Invalid requested UTC times');
@@ -220,8 +275,8 @@ export function analyzeObservations(args: {
     const freeSpacePathLossDb = canLink
       ? 32.45 + 20 * Math.log10(spacecraft.earthDistanceKm!) + 20 * Math.log10(spacecraft.radioFrequencyMHz!) : null;
     const receivedPowerDbm = freeSpacePathLossDb !== null
-      ? spacecraft.transmitterEirpDbm! + spacecraft.receiverGainDbi! - freeSpacePathLossDb - (spacecraft.otherLinkLossDb ?? 0) : null;
-    const linkMarginDb = receivedPowerDbm !== null ? receivedPowerDbm - spacecraft.receiverSensitivityDbm! : null;
+      ? eirpDbm! + spacecraft.receiverGainDbi! - freeSpacePathLossDb - otherLossDb : null;
+    const linkMarginDb = receivedPowerDbm !== null ? receivedPowerDbm - receiverSensitivityDbm! : null;
     const linkFeasible = linkMarginDb !== null
       ? earthVisible && linkMarginDb >= (spacecraft.minLinkMarginDb ?? 0) : earthVisible ? null : false;
     const powerOk = estimatedSolarPowerW !== null && spacecraft.minSolarPowerW !== undefined
@@ -237,7 +292,9 @@ export function analyzeObservations(args: {
       panelIncidenceCosine: canPower ? incidenceCos : null,
       panelIncidentIrradianceWm2: canPower ? SOLAR_CONSTANT * panelFactor : null,
       estimatedSolarPowerW, solarPowerMeetsThreshold: powerOk,
-      freeSpacePathLossDb, receivedPowerDbm, linkMarginDb, linkFeasible
+      freeSpacePathLossDb, receivedPowerDbm, linkMarginDb, linkFeasible,
+      linkEirpDbm: eirpDbm, linkSensitivityDbm: receiverSensitivityDbm,
+      linkOtherLossDb: canLink ? otherLossDb : null
     };
     return row;
   });
@@ -303,6 +360,11 @@ export function analyzeObservations(args: {
     linkAvailableHours: linkHours,
     linkAvailabilityPercent: linkHours !== null ? 100*linkHours/totalHours : null
   };
+  const batteryEnduranceHours = spacecraft.batteryCapacityWh !== undefined
+    && spacecraft.averageElectricalLoadW !== undefined
+    ? spacecraft.batteryCapacityWh / spacecraft.averageElectricalLoadW : null;
+  const batterySurvivesLongestDarkness = batteryEnduranceHours !== null
+    ? batteryEnduranceHours >= availability.longestDarknessHours : null;
   const constraints = [
     ['minSunlightPercent', spacecraft.minSunlightPercent, availability.sunlightPercent, (m:number,v:number)=>m>=v],
     ['minEarthLosPercent', spacecraft.minEarthLosPercent, availability.earthLosPercent, (m:number,v:number)=>m>=v],
@@ -315,11 +377,14 @@ export function analyzeObservations(args: {
     'Clearance and crossing times are linearly interpolated between samples; short events may be missed.',
     'The Sun and Earth are modeled by their centers, without partial disks or terrain uncertainty.',
     'Solar irradiance assumes 1361 W/m2 at 1 AU; Sun-observer range is not yet queried.',
-    'No site elevation, terrain slope or terrain footprint area is computed without validated DEM samples.'
+    'Terrain elevation, slope and footprint area are reported only when supplied by DEM-derived metadata; results require independent validation.'
   ];
   if (terrainMode === 'ideal_horizon') warnings.push('Ideal 0-degree horizon only: ignores terrain obstruction.');
+  if (terrainMode === 'terrain_aware' && horizonProfile?.metadata?.terrainSearchRadiusKm !== undefined)
+    warnings.push(`Terrain horizon includes sampled features within ${horizonProfile.metadata.terrainSearchRadiusKm} km; distant obstructions may be missed.`);
+  if (batteryEnduranceHours === null) warnings.push('Battery endurance unavailable without capacity (Wh) and average load (W).');
   if (!canPower) warnings.push('Solar power unavailable: panel area and efficiency must both be supplied.');
-  if (!canLink) warnings.push('RF link margin unavailable: complete spacecraft RF parameters and assumed Earth distance are required.');
+  if (!canLink) warnings.push('RF link margin unavailable: frequency, transmitter EIRP (or power/gain), receiver gain, sensitivity (or bandwidth/NF/SNR), and a distance assumption are required.');
   else warnings.push('RF distance is a user-assumed constant, not a Horizons-measured slant range; no antenna pointing, thermal noise or ground-station scheduling model.');
   if (availability.unevaluatedHours > 1e-7) warnings.push('A trailing part of the requested interval is unevaluated; percentages refer only to the evaluated duration.');
   if (Math.abs(siteLatDeg) > 89.9) warnings.push('Very near the lunar pole: verify the azimuth reference frame and relative bearings.');
@@ -327,8 +392,29 @@ export function analyzeObservations(args: {
     model: terrainMode,
     terrain: {
       source: terrainMode === 'ideal_horizon' ? null : horizonProfile!.provenance,
-      siteElevationM: null, localSlopeDeg: null, footprintSurfaceAreaM2: null,
+      siteElevationM: terrainMode === 'terrain_aware' ? (horizonProfile?.metadata?.siteElevationM ?? null) : null,
+      localSlopeDeg: terrainMode === 'terrain_aware' ? (horizonProfile?.metadata?.approxLocalSlopeDeg ?? null) : null,
+      footprintSurfaceAreaM2: terrainMode === 'terrain_aware'
+        ? (horizonProfile?.metadata?.footprintSurfaceAreaM2 ?? null) : null,
+      footprintProjectedAreaM2: terrainMode === 'terrain_aware'
+        ? (horizonProfile?.metadata?.footprintProjectedAreaM2 ?? null) : null,
+      footprintRadiusM: terrainMode === 'terrain_aware'
+        ? (horizonProfile?.metadata?.footprintRadiusM ?? null) : null,
+      terrainSearchRadiusKm: terrainMode === 'terrain_aware'
+        ? (horizonProfile?.metadata?.terrainSearchRadiusKm ?? null) : null,
       profile: terrainMode === 'ideal_horizon' ? null : horizon
+    },
+    energy: {
+      batteryEnduranceHours, batterySurvivesLongestDarkness,
+      note: 'Constant load and full usable battery capacity; no charge/discharge dynamics or thermal effects.'
+    },
+    linkBudget: {
+      effectiveEirpDbm: eirpDbm, sensitivityDbm: receiverSensitivityDbm,
+      aggregateOtherLossDb: canLink ? otherLossDb : null,
+      rangeKm: spacecraft.earthDistanceKm ?? null,
+      distanceSource: spacecraft.earthDistanceKm !== undefined ? 'user-assumed fixed range' : 'unavailable',
+      sensitivitySource: spacecraft.receiverSensitivityDbm !== undefined ? 'user supplied'
+        : receiverSensitivityDbm !== null ? 'kTB + noise figure + required SNR at 290K' : 'unavailable'
     },
     timeline, segments, availability, constraints,
     suitability: constraints.length === 0 ? 'indeterminate' : constraints.every(x=>x.passes) ? 'pass' : 'fail',
