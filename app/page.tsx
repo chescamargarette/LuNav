@@ -45,6 +45,34 @@ import { MISSION_REFERENCES } from "@/utils/missionReferences";
 
 // Historical touchdown locations match the Phase 3C mission reference catalog.
 const HISTORICAL_SITE_IDS = ["im1-odysseus", "im2-athena", "chandrayaan3"] as const;
+const HISTORICAL_COMPARE_SITES = HISTORICAL_SITE_IDS.map((id) => {
+  const reference = MISSION_REFERENCES.find((mission) => mission.id === id);
+  if (!reference) throw new Error(`Missing historical reference: ${id}`);
+  return {
+    id: reference.id,
+    name: id === "chandrayaan3" ? "Chandrayaan-3 Vikram (2023)" : reference.label,
+    lat: reference.latDeg,
+    lon: reference.lonDegEast,
+  };
+});
+const isHistoricalSite = (id: string): boolean =>
+  HISTORICAL_SITE_IDS.some((historicalId) => historicalId === id);
+
+type ComparisonMetric = "sunlight" | "earth" | "link" | "battery";
+const COMPARISON_METRICS: { id: ComparisonMetric; label: string; short: string }[] = [
+  { id: "sunlight", label: "SUNLIGHT AVAILABILITY", short: "SUNLIGHT" },
+  { id: "earth", label: "EARTH VISIBILITY", short: "EARTH VISIBILITY" },
+  { id: "link", label: "LINK AVAILABILITY", short: "RF LINK" },
+  { id: "battery", label: "MINIMUM BATTERY CHARGE", short: "BATTERY" },
+];
+
+function comparisonMetricValue(site: MissionCompareSite, metricId: ComparisonMetric): number | null {
+  const value = metricId === "sunlight" ? site.availability.sunlightPercent
+    : metricId === "earth" ? site.availability.earthLosPercent
+    : metricId === "link" ? site.availability.linkAvailabilityPercent
+    : site.energySimulation?.minimumStateOfChargePercent;
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
 
 import type { SpaceMarkerShape, TrafficMapItem } from "@/components/MoonMap2D";
 import type { SpacecraftSpecs } from "@/utils/terrainAnalysis";
@@ -446,6 +474,11 @@ type CompareState =
   | { key: string; status: "error"; error: string }
   | { key: string; status: "success"; site: MissionCompareSite; response: MissionCompareResponse };
 
+type HistoricalCompareState =
+  | { key: string; status: "loading" }
+  | { key: string; status: "error"; error: string }
+  | { key: string; status: "success"; response: MissionCompareResponse };
+
 /** Values in the demo profile are explicit user-editable assumptions, not mission facts. */
 type DemoFields = {
   solarPanelAreaM2: string;
@@ -703,7 +736,7 @@ function SurfaceHorizonSideView({
       <div className="mb-1.5 flex items-center justify-between font-mono text-[9px] tracking-widest">
         <span className="font-bold text-indigo-200/85">HORIZON SIDE VIEW</span>
         <span className="text-slate-400">
-          {terrainSlopeDeg === null ? "IDEAL 0° HORIZON" : `SLOPE ${metric(terrainSlopeDeg, "°")}`}
+          {terrainSlopeDeg === null ? "IDEAL 0° HORIZON" : `SCHEMATIC • LOCAL SLOPE ${metric(terrainSlopeDeg, "°")}`}
         </span>
       </div>
 
@@ -884,7 +917,7 @@ function SurfaceHorizonSideView({
 
 export default function MissionControlPage() {
   // View & UI State
-  const [is2DMode, setIs2DMode] = useState(true);
+  const [is2DMode, setIs2DMode] = useState(false);
   const [projectionMode, setProjectionMode] = useState<"EQ" | "SP">("EQ");
   const [layerMode, setLayerMode] = useState<TerrainLayerMode>("relief");
   const [markerShape, setMarkerShape] = useState<SpaceMarkerShape>("reticle");
@@ -939,9 +972,18 @@ export default function MissionControlPage() {
   >([]);
   const [bookmarkedSiteIds, setBookmarkedSiteIds] = useState<string[]>([]);
 
-  // Phase 4A: authoritative analysis for the selected landing site only.
+  // Phase 4C: all three historical sites share one mission-model comparison.
+  // Custom dropped pins continue to use the single-site Phase 4A path.
   const [compareState, setCompareState] = useState<CompareState | null>(null);
   const [compareRetry, setCompareRetry] = useState(0);
+  const [historicalCompareState, setHistoricalCompareState] = useState<HistoricalCompareState | null>(null);
+  const [historicalRetry, setHistoricalRetry] = useState(0);
+  const [comparisonMetric, setComparisonMetric] = useState<ComparisonMetric>("sunlight");
+  // Phase 4D: IM-2 has a genuine 30 km LOLA profile. Keep the 3-site ranking
+  // ideal-horizon for scientific comparability; fetch a separate IM-2 result.
+  const [terrainPreferred, setTerrainPreferred] = useState(true);
+  const [terrainSiteState, setTerrainSiteState] = useState<CompareState | null>(null);
+  const [terrainRetry, setTerrainRetry] = useState(0);
 
   // AI State
   const [isRoverThinking, setIsRoverThinking] = useState(false);
@@ -1092,9 +1134,123 @@ export default function MissionControlPage() {
   const selectedSiteRequestKey = selectedSite && !missionConfigError
     ? `${selectedSite.id}|${selectedSite.lat}|${selectedSite.lon}|${missionStartUtc}|${missionEndUtc}|${selectedTimezoneId}|${missionStepHours}|${demoSpacecraftEnabled}|${spacecraftFingerprint}`
     : null;
+  // This key is independent of which historical site is selected. Switching cards
+  // reuses the same 3-site response instead of re-querying JPL Horizons.
+  const historicalRequestKey = !missionConfigError
+    ? `historical3|${missionStartUtc}|${missionEndUtc}|${selectedTimezoneId}|${missionStepHours}|${spacecraftFingerprint}`
+    : null;
+  const terrainRequestKey = historicalRequestKey ? `lola-im2|${historicalRequestKey}` : null;
 
   useEffect(() => {
-    if (!selectedSite || !selectedSiteRequestKey) return;
+    if (!historicalRequestKey) return;
+    const requestKey = historicalRequestKey;
+    const controller = new AbortController();
+    const request: MissionCompareRequest = {
+      sites: HISTORICAL_COMPARE_SITES,
+      startUtc: missionStartUtc,
+      endUtc: missionEndUtc,
+      timezone: TIMEZONE_OPTIONS.find((tz) => tz.id === selectedTimezoneId)?.timeZone ?? "UTC",
+      stepHours: missionStepHours,
+      terrainMode: "ideal_horizon",
+      ...(parsedSpacecraft ? { spacecraft: parsedSpacecraft } : {}),
+    };
+    setHistoricalCompareState({ key: requestKey, status: "loading" });
+    async function loadHistoricalComparison() {
+      try {
+        const response = await fetch("/api/compare", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
+          signal: controller.signal,
+        });
+        const payload: unknown = await response.json();
+        if (!response.ok) {
+          throw new Error(compareErrorMessage(payload, `Comparison API returned HTTP ${response.status}`));
+        }
+        if (!payload || typeof payload !== "object" || !Array.isArray((payload as MissionCompareResponse).sites)) {
+          throw new Error("The comparison API returned an unexpected response");
+        }
+        const result = payload as MissionCompareResponse;
+        for (const candidate of HISTORICAL_COMPARE_SITES) {
+          const matched = result.sites.find((row) => row.id === candidate.id);
+          if (!matched || !Array.isArray(matched.timeline) || !matched.timeline.length || !matched.availability) {
+            throw new Error(`Missing analysis for ${candidate.name}`);
+          }
+        }
+        if (!controller.signal.aborted) {
+          setHistoricalCompareState({ key: requestKey, status: "success", response: result });
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          setHistoricalCompareState({
+            key: requestKey,
+            status: "error",
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }
+    // Debounce frequent settings edits; cancel stale responses when inputs change.
+    const timeout = window.setTimeout(() => { void loadHistoricalComparison(); }, 350);
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [historicalRequestKey, missionStartUtc, missionEndUtc, selectedTimezoneId,
+      missionStepHours, parsedSpacecraft, historicalRetry]);
+
+  // Terrain geometry is computed only for the one historical site with a complete
+  // precomputed LOLA profile. Missing coverage never silently falls back inside
+  // a terrain_aware request: the ideal baseline is displayed and labeled separately.
+  useEffect(() => {
+    if (!terrainPreferred || selectedSite?.id !== "im2-athena" || !terrainRequestKey) return;
+    const key = terrainRequestKey;
+    const controller = new AbortController();
+    const request: MissionCompareRequest = {
+      sites: [HISTORICAL_COMPARE_SITES.find((site) => site.id === "im2-athena")!],
+      startUtc: missionStartUtc,
+      endUtc: missionEndUtc,
+      timezone: TIMEZONE_OPTIONS.find((tz) => tz.id === selectedTimezoneId)?.timeZone ?? "UTC",
+      stepHours: missionStepHours,
+      terrainMode: "terrain_aware",
+      ...(parsedSpacecraft ? { spacecraft: parsedSpacecraft } : {}),
+    };
+    setTerrainSiteState({ key, status: "loading" });
+    async function loadTerrain() {
+      try {
+        const response = await fetch("/api/compare", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
+          signal: controller.signal,
+        });
+        const payload: unknown = await response.json();
+        if (!response.ok) {
+          throw new Error(compareErrorMessage(payload, `Terrain API returned HTTP ${response.status}`));
+        }
+        if (!payload || typeof payload !== "object" || !Array.isArray((payload as MissionCompareResponse).sites)) {
+          throw new Error("The terrain API returned an unexpected response");
+        }
+        const result = payload as MissionCompareResponse;
+        const site = result.sites.find((row) => row.id === "im2-athena");
+        if (!site || site.model !== "terrain_aware" || !Array.isArray(site.timeline) || !site.timeline.length
+            || !site.terrain.source || !site.terrain.profile) {
+          throw new Error("LOLA terrain profile was not applied to the IM-2 analysis");
+        }
+        if (!controller.signal.aborted) setTerrainSiteState({ key, status: "success", site, response: result });
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          setTerrainSiteState({ key, status: "error", error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+    }
+    const timeout = window.setTimeout(() => { void loadTerrain(); }, 650);
+    return () => { window.clearTimeout(timeout); controller.abort(); };
+  }, [terrainPreferred, selectedSite?.id, terrainRequestKey, missionStartUtc, missionEndUtc,
+      selectedTimezoneId, missionStepHours, parsedSpacecraft, terrainRetry]);
+
+  useEffect(() => {
+    if (!selectedSite || !selectedSiteRequestKey || isHistoricalSite(selectedSite.id)) return;
     const requestKey = selectedSiteRequestKey;
     const requestSiteId = selectedSite.id;
     const controller = new AbortController();
@@ -1157,8 +1313,54 @@ export default function MissionControlPage() {
   }, [selectedSite, selectedSiteRequestKey, missionStartUtc, missionEndUtc, selectedTimezoneId,
       missionStepHours, parsedSpacecraft, compareRetry]);
 
-  // A previous site's response is never displayed while the next request loads.
-  const activeCompareState = compareState?.key === selectedSiteRequestKey ? compareState : null;
+  // Display only results matching the current mission parameters; no stale science.
+  const activeHistoricalCompare = historicalCompareState?.key === historicalRequestKey
+    ? historicalCompareState : null;
+  const historicalSitesById = useMemo(() => {
+    const results = new Map<string, MissionCompareSite>();
+    if (activeHistoricalCompare?.status === "success") {
+      for (const row of activeHistoricalCompare.response.sites) results.set(row.id, row);
+    }
+    return results;
+  }, [activeHistoricalCompare]);
+  // Rank only complete, comparable quantities. No arbitrary combined suitability score.
+  const historicalRanks = useMemo(() => {
+    const ranks = new Map<string, number>();
+    const scores = HISTORICAL_COMPARE_SITES.map((site) => ({
+      id: site.id,
+      value: historicalSitesById.has(site.id)
+        ? comparisonMetricValue(historicalSitesById.get(site.id)!, comparisonMetric) : null,
+    }));
+    if (scores.some((item) => item.value === null)) return ranks;
+    const sorted = [...scores].sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
+    for (const row of sorted) {
+      const rank = 1 + sorted.filter((other) => (other.value ?? 0) > (row.value ?? 0) + 1e-7).length;
+      ranks.set(row.id, rank);
+    }
+    return ranks;
+  }, [historicalSitesById, comparisonMetric]);
+
+  // The shared 3-site comparison stays ideal-horizon, so rankings are comparable.
+  // For selected IM-2, substitute the fully terrain-aware sample only when ready.
+  const activeTerrainCompare = terrainPreferred && selectedSite?.id === "im2-athena"
+    && terrainSiteState?.key === terrainRequestKey ? terrainSiteState : null;
+  const terrainResult = activeTerrainCompare?.status === "success" ? activeTerrainCompare.site : null;
+  const im2Ideal = historicalSitesById.get("im2-athena") ?? null;
+  const activeCompareState: CompareState | null = terrainResult && activeTerrainCompare?.status === "success"
+    ? activeTerrainCompare
+    : selectedSite && isHistoricalSite(selectedSite.id)
+    ? activeHistoricalCompare?.status === "success"
+      ? (() => {
+          const row = historicalSitesById.get(selectedSite.id);
+          return row && historicalRequestKey
+            ? { key: historicalRequestKey, status: "success" as const,
+                site: row, response: activeHistoricalCompare.response }
+            : null;
+        })()
+      : activeHistoricalCompare?.status === "error" && historicalRequestKey
+        ? { key: historicalRequestKey, status: "error", error: activeHistoricalCompare.error }
+        : null
+    : compareState?.key === selectedSiteRequestKey ? compareState : null;
   const analyzedSite = activeCompareState?.status === "success" ? activeCompareState.site : null;
   const initialGeometry = analyzedSite?.timeline[0] ?? null;
   const selectedAnalysisStatus = selectedSite
@@ -1969,24 +2171,52 @@ export default function MissionControlPage() {
           )}
         </div>
 
-        {/* Historical mission references; preview figures are not Phase 3C results yet. */}
+        {/* Phase 4C multi-site comparison uses the same NASA/Horizons mission inputs for all three. */}
         <div className="lunav-scroll flex-1 space-y-2.5 overflow-y-auto pr-1.5">
           <div className="sticky top-0 z-10 flex items-center justify-between bg-[#0f1328]/95 pt-1 pb-2 font-mono text-[10px] font-semibold tracking-widest text-indigo-200/70 backdrop-blur">
             <span>HISTORICAL LANDING SITES ({HISTORICAL_SITE_IDS.length})</span>
-            {allPinnedIds.length > 0 && (
-              <span className="rounded-full bg-fuchsia-400/15 px-2 py-0.5 text-[9px] text-fuchsia-200">
-                {allPinnedIds.length} PINNED
-              </span>
+            <span className={`text-[9px] ${missionConfigError || activeHistoricalCompare?.status === "error" ? "text-rose-300" : activeHistoricalCompare?.status === "success" ? "text-emerald-300" : "text-amber-200"}`}>
+              {missionConfigError ? "INVALID SETTINGS" : activeHistoricalCompare?.status === "success" ? "NASA READY" : activeHistoricalCompare?.status === "error" ? "API ERROR" : "LOADING"}
+            </span>
+          </div>
+          <div className="mb-2 space-y-1.5 font-mono text-[9px]">
+            <p className="text-slate-400">
+              3 REAL LANDING LOCATIONS • SAME UTC WINDOW • IDEAL 0° HORIZON FOR FAIR RANKING
+            </p>
+            <div className="flex items-center justify-between gap-2">
+              <label htmlFor="compare-sort" className="shrink-0 text-indigo-200/80">COMPARE BY</label>
+              <select id="compare-sort" value={comparisonMetric}
+                onChange={(event) => setComparisonMetric(event.target.value as ComparisonMetric)}
+                className="max-w-[185px] rounded-lg border border-indigo-300/20 bg-[#171c38] px-2 py-1 text-[9px] text-indigo-100">
+                {COMPARISON_METRICS.map((option) => (
+                  <option key={option.id} value={option.id}>{option.label}</option>
+                ))}
+              </select>
+            </div>
+            {missionConfigError && <p role="alert" className="text-rose-200">{missionConfigError}</p>}
+            {activeHistoricalCompare?.status === "loading" && (
+              <p role="status" className="text-amber-200/80">CALCULATING THREE SITES FROM NASA JPL HORIZONS...</p>
+            )}
+            {activeHistoricalCompare?.status === "error" && (
+              <div className="rounded-lg border border-rose-300/20 p-2">
+                <p role="alert" className="break-words text-rose-200">{activeHistoricalCompare.error}</p>
+                <button type="button" onClick={() => setHistoricalRetry((v) => v + 1)}
+                  className="mt-1 rounded-md border border-indigo-300/25 px-2 py-1 text-indigo-200 hover:bg-indigo-300/10">
+                  RETRY COMPARISON
+                </button>
+              </div>
+            )}
+            {activeHistoricalCompare?.status === "success" && historicalRanks.size === 0 && (
+              <p className="text-amber-200/80">SELECTED METRIC UNAVAILABLE. ENABLE SPACECRAFT SETTINGS TO COMPARE POWER / RF.</p>
             )}
           </div>
-
-          <p className="mb-2 font-mono text-[8px] tracking-wide text-amber-200/70">
-            VERIFIED LANDING COORDINATES • SUN/COMM FIGURES ARE PREVIEWS
-          </p>
           {sites.map((site) => {
             const isCustomPin = site.id.startsWith("pinned-");
             const isPinned =
               isCustomPin || bookmarkedSiteIds.includes(site.id);
+            const isHistorical = isHistoricalSite(site.id);
+            const liveSite = isHistorical ? historicalSitesById.get(site.id) : null;
+            const rank = isHistorical ? historicalRanks.get(site.id) : undefined;
 
             return (
               <div
@@ -2007,6 +2237,12 @@ export default function MissionControlPage() {
                   <div className="flex items-center gap-1">
                     {selectedSiteId === site.id && (
                       <Crosshair className="h-3.5 w-3.5 text-indigo-200 drop-shadow-[0_0_7px_rgba(199,210,254,0.95)]" />
+                    )}
+                    {rank !== undefined && (
+                      <span className={`rounded-full px-1.5 py-0.5 font-mono text-[8px] font-semibold ${rank === 1 ? "bg-emerald-400/15 text-emerald-200" : "bg-indigo-400/15 text-indigo-200"}`}
+                        title={`Rank ${rank} for ${COMPARISON_METRICS.find((option) => option.id === comparisonMetric)?.label ?? comparisonMetric}; ties share ranks`}>
+                        #{rank}
+                      </span>
                     )}
                     <button
                       type="button"
@@ -2044,16 +2280,38 @@ export default function MissionControlPage() {
                 <div className="mt-1 font-mono text-[9px] text-slate-400">
                   LAT {site.lat}° | LON {site.lon}°
                 </div>
-                <div className="mt-2.5 flex items-center justify-between font-mono text-[10px]">
-                  <span className="flex items-center gap-1.5 text-amber-200">
-                    <Sun className="h-3 w-3 drop-shadow-[0_0_5px_rgba(253,230,138,0.8)]" />{" "}
-                    {site.sunlight_percent}%
-                  </span>
-                  <span className="flex items-center gap-1.5 text-emerald-300">
-                    <Radio className="h-3 w-3 drop-shadow-[0_0_5px_rgba(110,231,183,0.8)]" />{" "}
-                    {site.comms_window_hours}H
-                  </span>
-                </div>
+                {isHistorical && (
+                  <p className={`mt-1 font-mono text-[8px] ${site.id === "im2-athena" ? "text-cyan-300" : "text-slate-500"}`}>
+                    {site.id === "im2-athena" ? "LOLA 80 M PROFILE AVAILABLE • 30 KM RADIUS"
+                      : site.id === "im1-odysseus" ? "LOLA PROFILE INCOMPLETE • DEM EDGE"
+                      : "LOLA PROFILE UNAVAILABLE • OUTSIDE DEM"}
+                  </p>
+                )}
+                {isHistorical ? (
+                  <>
+                    <div className="mt-2.5 flex items-center justify-between font-mono text-[10px]">
+                      <span className="flex items-center gap-1.5 text-amber-200" title="Sunlight availability over the selected mission window">
+                        <Sun className="h-3 w-3 drop-shadow-[0_0_5px_rgba(253,230,138,0.8)]" />{" "}
+                        {metric(liveSite?.availability.sunlightPercent, "%")}
+                      </span>
+                      <span className="flex items-center gap-1.5 text-emerald-300" title="Earth visibility over the selected mission window, not a communications guarantee">
+                        <Radio className="h-3 w-3 drop-shadow-[0_0_5px_rgba(110,231,183,0.8)]" />{" "}
+                        {metric(liveSite?.availability.earthLosPercent, "%")}
+                      </span>
+                    </div>
+                    <div className="mt-1.5 flex justify-between gap-2 font-mono text-[8px] text-slate-400">
+                      <span>RF LINK: {metric(liveSite?.availability.linkAvailabilityPercent, "%")}</span>
+                      <span>MIN BATTERY: {metric(liveSite?.energySimulation?.minimumStateOfChargePercent, "%")}</span>
+                    </div>
+                    <p className="mt-1 font-mono text-[8px] text-indigo-300/60">
+                      {liveSite ? "NASA MODEL • RF/BATTERY = DEMO" : missionConfigError ? "FIX SETTINGS TO ANALYZE" : activeHistoricalCompare?.status === "error" ? "ANALYSIS UNAVAILABLE" : "AWAITING NASA ANALYSIS"}
+                    </p>
+                  </>
+                ) : (
+                  <p className="mt-2.5 font-mono text-[9px] text-amber-200/70">
+                    CUSTOM PIN • SELECT TO ANALYZE • NOT IN 3-SITE RANKING
+                  </p>
+                )}
               </div>
             );
           })}
@@ -2140,7 +2398,9 @@ export default function MissionControlPage() {
                 <p role="alert" className="break-words text-rose-200">{activeCompareState.error}</p>
                 <button
                   type="button"
-                  onClick={() => setCompareRetry((value) => value + 1)}
+                  onClick={() => isHistoricalSite(selectedSite.id)
+                    ? setHistoricalRetry((value) => value + 1)
+                    : setCompareRetry((value) => value + 1)}
                   className="rounded-lg border border-indigo-300/35 px-2 py-1 font-bold text-indigo-200 hover:bg-indigo-300/10"
                 >
                   RETRY NASA ANALYSIS
@@ -2158,6 +2418,69 @@ export default function MissionControlPage() {
               </p>
             )}
           </div>
+
+          {/* Phase 4D: terrain coverage is explicit. Comparison ranking remains ideal for all sites. */}
+          {isHistoricalSite(selectedSite.id) && (
+            <div className="mt-2.5 rounded-xl border border-cyan-300/20 bg-[#080e20]/75 p-2.5 font-mono text-[9px] leading-relaxed">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold tracking-widest text-cyan-200">NASA LOLA TERRAIN</span>
+                <span className={selectedSite.id === "im2-athena" ? "text-cyan-300" : "text-amber-300"}>
+                  {selectedSite.id === "im2-athena" ? "PROFILE AVAILABLE" : "NO FULL PROFILE"}
+                </span>
+              </div>
+              {selectedSite.id === "im2-athena" ? (
+                <>
+                  <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-slate-400">VIEW SELECTED SITE</span>
+                    <button type="button" onClick={() => setTerrainPreferred((v) => !v)}
+                      className="rounded-md border border-cyan-300/30 bg-cyan-400/5 px-2 py-1 text-cyan-200 hover:bg-cyan-400/10">
+                      {terrainPreferred ? "TERRAIN-AWARE • ON" : "IDEAL BASELINE • ON"} / SWITCH
+                    </button>
+                  </div>
+                  {terrainPreferred && activeTerrainCompare?.status === "loading" && (
+                    <p role="status" className="mt-1 text-amber-200">Computing LOLA-aware illumination and line of sight... ideal values shown until ready.</p>
+                  )}
+                  {terrainPreferred && !activeTerrainCompare && !missionConfigError && (
+                    <p role="status" className="mt-1 text-amber-200">Loading LOLA analysis... ideal values shown temporarily.</p>
+                  )}
+                  {terrainPreferred && activeTerrainCompare?.status === "error" && (
+                    <div className="mt-1 text-rose-200">
+                      <p role="alert" className="break-words">LOLA analysis unavailable: {activeTerrainCompare.error}</p>
+                      <button type="button" onClick={() => setTerrainRetry((v) => v + 1)}
+                        className="mt-1 rounded border border-rose-200/30 px-2 py-1">RETRY LOLA ANALYSIS</button>
+                      <p className="mt-1">Showing ideal-horizon baseline, not terrain-aware results.</p>
+                    </div>
+                  )}
+                  <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 border-t border-cyan-200/10 pt-2">
+                    <span className="text-slate-400">SITE ELEVATION</span>
+                    <span className="text-right text-cyan-200">{metric(terrainResult?.terrain.siteElevationM, " m", 0)}</span>
+                    <span className="text-slate-400">LOCAL SLOPE (500 M FIT)</span>
+                    <span className="text-right text-cyan-200">{metric(terrainResult?.terrain.localSlopeDeg, "°", 2)}</span>
+                    <span className="text-slate-400">SAMPLED SURFACE AREA</span>
+                    <span className="text-right text-cyan-200">{metric(terrainResult?.terrain.footprintSurfaceAreaM2, " m²", 0)}</span>
+                    <span className="text-slate-400">SUN HORIZON / CLEARANCE</span>
+                    <span className="text-right text-amber-200">{terrainResult?.timeline[0] ? `${metric(terrainResult.timeline[0].sunHorizonDeg, "°", 2)} / ${metric(terrainResult.timeline[0].sunClearanceDeg, "°", 2)}` : "—"}</span>
+                    <span className="text-slate-400">EARTH HORIZON / CLEARANCE</span>
+                    <span className="text-right text-emerald-200">{terrainResult?.timeline[0] ? `${metric(terrainResult.timeline[0].earthHorizonDeg, "°", 2)} / ${metric(terrainResult.timeline[0].earthClearanceDeg, "°", 2)}` : "—"}</span>
+                  </div>
+                  {terrainResult && im2Ideal && (
+                    <p className="mt-2 text-cyan-200/80">
+                      TERRAIN VS IDEAL: SUN {metric(terrainResult.availability.sunlightPercent - im2Ideal.availability.sunlightPercent, "%", 1)} POINTS
+                      {" • "}EARTH {metric(terrainResult.availability.earthLosPercent - im2Ideal.availability.earthLosPercent, "%", 1)} POINTS
+                    </p>
+                  )}
+                  <p className="mt-2 text-slate-500">LOLA 80 m DEM • 30 km ray-sampled horizon • 1° azimuth sampling • modeled and unvalidated beyond sampled radius. Comparison-card ranks remain ideal-horizon.</p>
+                </>
+              ) : (
+                <p className="mt-2 text-amber-200/80">
+                  {selectedSite.id === "im1-odysseus"
+                    ? "IM-1 is ~4 km from the northern 80°S DEM limit; 30 km horizons are incomplete. Ideal-horizon geometry only."
+                    : "Chandrayaan-3 (69.37°S) is outside the current 80°S–90°S LOLA DEM. Ideal-horizon geometry only."}
+                  {" "}Terrain elevation, slope and sampled surface area are unavailable—not zero.
+                </p>
+              )}
+            </div>
+          )}
 
           {/* Only Phase 3C values are shown here; no mock metric fallbacks. */}
           <div className="mt-3.5 space-y-2 font-mono text-[10px]">
@@ -2220,6 +2543,14 @@ export default function MissionControlPage() {
             <div className="flex justify-between border-b border-white/5 pb-1.5">
               <span className="text-slate-400">TERRAIN SLOPE</span>
               <span className="text-rose-300">{metric(analyzedSite?.terrain.localSlopeDeg, "°")}</span>
+            </div>
+            <div className="flex justify-between border-b border-white/5 pb-1.5">
+              <span className="text-slate-400">SUN HORIZON (START)</span>
+              <span className="text-amber-200">{metric(initialGeometry?.sunHorizonDeg, "°", 2)}</span>
+            </div>
+            <div className="flex justify-between border-b border-white/5 pb-1.5">
+              <span className="text-slate-400">EARTH HORIZON (START)</span>
+              <span className="text-emerald-300">{metric(initialGeometry?.earthHorizonDeg, "°", 2)}</span>
             </div>
             {analyzedSite && (initialGeometry?.estimatedSolarPowerW == null || initialGeometry.linkMarginDb == null) && (
               <p className="text-[9px] leading-relaxed text-slate-500">

@@ -1718,7 +1718,7 @@ function MoonGlobeComponent({
     scene.background = new THREE.Color(0x03050c);
 
     const camera = new THREE.PerspectiveCamera(42, width / height, 0.1, 28000);
-    camera.position.set(6.4, 0.35, 0.2);
+    camera.position.set(10.5, 0.35, 0.2);
     camera.layers.enable(0);
     camera.layers.enable(1);
     camera.layers.enable(2);
